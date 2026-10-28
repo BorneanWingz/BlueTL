@@ -1,0 +1,33 @@
+# Secrets and local configuration
+.env
+.env.*
+*.env
+config.json
+**/config.json
+%APPDATA%/
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Build and packaging output
+build/
+dist/
+*.spec
+
+# Local model files and downloaded weights
+models/
+**/models/
+*.onnx
+*.pt
+*.safetensors
+*.bin
+
+# Local reference clones and temporary files
+references/
+*.log
+.DS_Store
+Thumbs.db
