@@ -15,6 +15,7 @@ __pycache__/
 
 # Build and packaging output
 build/
+build_pending/
 dist/
 *.spec
 
@@ -25,6 +26,14 @@ models/
 *.pt
 *.safetensors
 *.bin
+# //remarks: The vendored detector package keeps its network definition in comic_text_detector\models,
+# //remarks: so that one folder must stay tracked even though "models/" is ignored. The detector weights
+# //remarks: (assets\comic-text-detector-model\comictextdetector.pt) stay local like the Manga OCR weights.
+!comic_text_detector/models/
+!comic_text_detector/models/**
+# //remarks: The re-include above would also bring back byte-code caches, so that exclusion is restored.
+comic_text_detector/**/__pycache__/
+comic_text_detector/**/*.py[cod]
 
 # Local reference clones and temporary files
 references/
