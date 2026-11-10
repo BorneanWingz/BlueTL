@@ -10,4 +10,7 @@ torchsummary>=1.5,<2
 torchvision>=0.15
 tqdm>=4.41
 rarfile>=4.2,<5
+# //remarks: Layered Photoshop (.psd) pages must be flattened before the text detector can read them.
+# //remarks: Pillow's built-in PSD plugin rejects 16-bit documents, so psd-tools does the compositing.
+psd-tools>=1.10,<2
 pyinstaller>=6.10,<7

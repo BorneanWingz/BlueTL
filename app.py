@@ -1,4 +1,4 @@
-import sys, json, os, re, base64, ctypes, shutil, tempfile, zipfile
+import sys, json, os, re, base64, ctypes, shutil, tempfile, zipfile, time, threading, socket, ssl, urllib.request, urllib.error, urllib.parse
 from pathlib import Path
 
 os.environ.setdefault('HF_HUB_OFFLINE','1')
@@ -34,16 +34,279 @@ def unprotect(value):
 from dataclasses import dataclass
 from openai import OpenAI
 from docx import Document
-from PySide6.QtWidgets import QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QLineEdit,QComboBox,QPushButton,QFileDialog,QTableWidget,QTableWidgetItem,QMessageBox,QLabel,QHeaderView,QTabWidget,QProgressBar,QSizePolicy,QStyle,QStyleOptionButton
-from PySide6.QtCore import Qt,QSize
+from PySide6.QtWidgets import QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QLineEdit,QComboBox,QPushButton,QFileDialog,QTableWidget,QTableWidgetItem,QMessageBox,QLabel,QHeaderView,QTabWidget,QProgressBar,QSizePolicy,QStyle,QStyleOptionButton,QCheckBox
+from PySide6.QtCore import Qt,QSize,QTimer
 from PySide6.QtGui import QIcon,QPainter,QPalette
 
 CFG=Path(os.getenv('APPDATA',Path.home()))/'BlueTL'/'config.json'
 LANGS=['English','Bahasa Melayu','Simplified Chinese','Traditional Chinese']
-FREE_MODELS=['asai/freemodel-1-GLM','asai/freemodel-2-MiniMax','asai/freemodel-3-deepseekpro','asai/freemodel-4-ds-v4.1flash','asai/freemodel-5-kimi']
-MODELS=FREE_MODELS+['asai/minimax-m3','asai/deepseek-v4.1-flash','asai/glm-5.3-flash','asai/qwen3.8-flash','asai/claude-haiku-5.5','asai/claude-haiku-4.5','asai/kimi-k2.7']
+# //remarks: No provider is baked into the executable. The Base URL, API key, and model list are
+# //remarks: deliberately NOT hard-coded: a build must work against any OpenAI-compatible provider, so the
+# //remarks: URL field starts empty and the model dropdown only ever holds what that provider's own
+# //remarks: GET /models endpoint returned (plus whatever ID the user typed). Everything the user enters is
+# //remarks: remembered in the settings file, so their provider, key, and model survive a restart.
+# //remarks: FREE_MODELS is intentionally empty: "free" is decided at run time by the Free models only tick
+# //remarks: box, which searches the fetched list for the text "free" instead of trusting a built-in name list.
+FREE_MODELS=[]
+MODELS=[]
+
+# //remarks: Search token behind the "Free models only" tick box. A model ID is treated as free when it
+# //remarks: contains this text, case-insensitively (vendor/freemodel-x, gpt-4o-mini:free, ...).
+FREE_MODEL_TOKEN='free'
+# //remarks: Saved-provider picker entries. The verified tick follows the British "proved/verified" wording used in
+# //remarks: the status line, and the placeholder keeps index 0 free so itemData(0) can never look like a provider.
+PLACEHOLDER_PROVIDER='Select a saved provider...'
+PROVIDER_VERIFIED=chr(0x2714)+' '
+PROVIDER_UNVERIFIED=chr(0x2014)+' '
+# //remarks: One wording for the certificate note, so the status tooltip and the fetch message cannot drift apart.
+CERT_NOTE='The provider certificate is valid for {days} more day(s).'
+
+def is_free_model(model_id):
+ # //remarks: Single definition of "free" so the dropdown filter and the retry order can never disagree.
+ return FREE_MODEL_TOKEN in str(model_id or '').lower()
+
+def filter_models(ids,free_only=False):
+ # //remarks: Apply the Free models only tick box to a model list while preserving the provider's order.
+ # //remarks: Duplicates and blanks are dropped so the dropdown never repeats an entry.
+ seen=[]; selected=[]
+ for value in ids or []:
+  if not isinstance(value,str): continue
+  text=value.strip()
+  if not text or text in seen: continue
+  seen.append(text)
+  if not free_only or is_free_model(text): selected.append(text)
+ return selected
+
+# //remarks: A provider is remembered per Base URL, so the API key, the verified state, and the chosen model all
+# //remarks: belong to one URL and cannot leak to another. profile_key normalises the URL the same way the field is
+# //remarks: compared everywhere else, so "HTTPS://Host/v1/" and "https://host/v1" are one provider rather than two.
+def profile_key(url):
+ text=str(url or '').strip().rstrip('/')
+ if not text: return ''
+ return normalized_url(text).lower()
+
+def load_profiles(data):
+ # //remarks: Only well-formed entries are kept: a damaged profile (wrong types, no URL) is dropped instead of
+ # //remarks: breaking startup, exactly like a damaged config is treated as a missing one.
+ profiles={}
+ raw=data.get('providers') if isinstance(data,dict) else None
+ if isinstance(raw,dict):
+  for key,value in raw.items():
+   if not isinstance(key,str) or not key.strip() or not isinstance(value,dict): continue
+   url=str(value.get('url') or key).strip()
+   if not url: continue
+   models=value.get('models')
+   profiles[profile_key(key) or key]={'url':url,'api_key':str(value.get('api_key') or ''),'verified':bool(value.get('verified',False)),'model':str(value.get('model') or '').strip(),'models':[m for m in models if isinstance(m,str) and m.strip()] if isinstance(models,list) else []}
+ return profiles
+
+def remember_profile(data,url,key_cipher,models=None,verified=None,model=None):
+ # //remarks: Update just the one provider a successful connect or API test touched, leaving every other saved
+ # //remarks: provider exactly as it was. The URL is stored as typed so the user's own text comes back unchanged.
+ key=profile_key(url)
+ if not key: return data
+ profiles=data.get('providers') if isinstance(data.get('providers'),dict) else {}
+ entry=dict(profiles.get(key) or {})
+ entry['url']=str(url).strip()
+ if key_cipher not in (None,''): entry['api_key']=key_cipher
+ elif 'api_key' not in entry: entry['api_key']=''
+ entry['verified']=bool(entry.get('verified',False)) if verified is None else bool(verified)
+ if models is not None: entry['models']=[m for m in models if isinstance(m,str) and m.strip()][:500]
+ if model is not None: entry['model']=str(model).strip()
+ entry.setdefault('models',[]); entry.setdefault('model','')
+ profiles[key]=entry
+ data['providers']=profiles
+ return data
 @dataclass
 class Row: page:int; panel:int; jp:str; tr:str=''; crop:str=''; review:str=''; reason:str=''
+
+# //remarks: Turn whatever the tester typed into a Base URL that model discovery can call. This value is only
+# //remarks: used for the GET request - the Base URL field keeps exactly what was typed, because the translation
+# //remarks: client must keep receiving that same text, and rewriting it could break a provider whose working
+# //remarks: endpoint has no version segment. A bare host gains a scheme (http for a local server, https
+# //remarks: otherwise) and the OpenAI-compatible version path, so a bare domain or "localhost:1234" both
+# //remarks: become callable.
+def normalized_url(raw):
+ text=str(raw or '').strip().rstrip('/')
+ if not text: return ''
+ # //remarks: A scheme-less host is a real input case: a local server is nearly always plain http, while a
+ # //remarks: public provider is https today, so the guessed scheme follows the host name.
+ if not re.match(r'[a-z][a-z0-9+.-]*://',text,re.I):
+  host=text.split('/',1)[0].split(':',1)[0].lower()
+  local=host in ('localhost','127.0.0.1','::1') or host.startswith('192.168.') or host.startswith('10.') or re.match(r'^172\.(1[6-9]|2\d|3[01])\.',host)
+  text=('http://' if local else 'https://')+text
+ parts=text.split('#',1)[0].split('?',1)[0]
+ # //remarks: The OpenAI-compatible convention is that the base URL carries the version segment (".../v1",
+ # //remarks: ".../openai/v1"), so one is added when the tester left it out. An existing version suffix is left
+ # //remarks: untouched. This is only the URL discovery calls - the Base URL field itself is never rewritten, so
+ # //remarks: the translation client keeps receiving exactly what the tester typed.
+ if not re.search(r'/v\d+(?:\.\d+)?$',parts,re.I): parts+='/v1'
+ return parts.rstrip('/')
+
+# //remarks: TLS failures used to reach the user as one opaque urlopen string, so a genuinely expired
+# //remarks: certificate, an untrusted root, and antivirus HTTPS scanning all read as the same
+# //remarks: "expired SSL" message. Hostname and expiry are parsed out of the OpenSSL reason so the status
+# //remarks: line can name the real problem and the action that fixes it.
+def cert_host_name_error(text):
+ match=re.search(r"Hostname mismatch, certificate is not valid for '([^']+)'",text or '')
+ return match.group(1) if match else ''
+
+def cert_expired(text):
+ # //remarks: OpenSSL's reason string allows both spellings and wraps the expiry inside a sentence, so the check is
+ # //remarks: deliberately about the phrase rather than an exact match.
+ return 'certificate has expired' in (text or '').lower()
+
+def describe_ssl_error(error):
+ # //remarks: One place that turns any TLS failure into a sentence the user can act on: name the expiry when
+ # //remarks: the certificate really is out of date, and name the interception when a scanner's own
+ # //remarks: certificate (or a mismatched name) is what Python refused. The antivirus hint matters because a
+ # //remarks: browser hides this by trusting the scanner's root, so replicating it in a browser proves nothing.
+ text=str(error)
+ host=cert_host_name_error(text)
+ hint=' If an antivirus or corporate HTTPS scanner is running, allow this domain or turn off its web scanning.'
+ if cert_expired(text): return 'The provider certificate has expired or is not yet valid, so Windows rejected it. It must be renewed on the server; retrying cannot help.'
+ if host: return f'The provider certificate is not valid for {host} (the server sent a certificate for a different name).{hint}'
+ if 'self-signed' in text.lower() or 'self signed' in text.lower(): return f'The provider certificate is self-signed and not trusted by this PC. Add it to the Windows trust store, or use a provider with a public certificate.{hint}'
+ if 'unable to get local issuer' in text.lower(): return f'The provider certificate cannot be traced to a trusted root. A TLS-inspecting antivirus or proxy is the usual cause.{hint}'
+ return f'TLS handshake failed: {text}.{hint}'
+
+def _raise_friendly_http(error,url):
+ # //remarks: A rejected key is the most common failure and the provider's own JSON already names it, so the
+ # //remarks: body is preferred over a bare status code. Only a short body is read, because the error body of a
+ # //remarks: gateway can be a whole HTML page.
+ try: body=error.read(600).decode('utf-8','replace').strip()
+ except Exception: body=''
+ if body:
+  try: detail=json.loads(body).get('error')
+  except ValueError: detail=None
+  if isinstance(detail,dict): detail=detail.get('message') or detail.get('code')
+  if detail: raise RuntimeError(f'HTTP {error.code} from {url}: {detail}')
+ raise RuntimeError(f'HTTP {error.code} from {url}')
+
+# //remarks: Discovery is deliberately silent: if the list cannot be fetched the current dropdown is left alone
+# //remarks: and the user keeps the manual-entry path, because no OCR or translation behaviour depends on this helper.
+def fetch_models_once(base_url,api_key,timeout=10):
+ head={'Authorization':f'Bearer {api_key}'}
+ req=urllib.request.Request(base_url.rstrip('/')+'/models',headers=head,method='GET')
+ # //remarks: Transport and HTTP failures are raised rather than swallowed, so a manual refresh can name the
+ # //remarks: real reason (rejected key, wrong path, offline host). A valid answer whose list is simply empty
+ # //remarks: still returns [], which is how an empty provider catalogue is told apart from a failed request.
+ # //remarks: The caller keeps the current list when anything here raises, so the dropdown is never emptied.
+ try:
+  with urllib.request.urlopen(req,timeout=timeout) as resp: payload=json.loads(resp.read().decode('utf-8','replace'))
+ except urllib.error.HTTPError as e: _raise_friendly_http(e,req.full_url)
+ # //remarks: A TLS failure is caught before the generic OSError handler, because it is the one transport error
+ # //remarks: the user cannot diagnose from the raw message; describe_ssl_error names the cause and the fix.
+ except ssl.SSLError as e: raise RuntimeError(describe_ssl_error(e))
+ # //remarks: URLError wraps the TLS failure of urlopen, so the reason is unwrapped before it is described here.
+ except urllib.error.URLError as e:
+  if isinstance(e.reason,ssl.SSLError): raise RuntimeError(describe_ssl_error(e.reason))
+  # //remarks: URLError, timeouts, and refused connections are all OSError subclasses, so one handler covers
+  # //remarks: an offline host, a wrong port, and a provider that accepts the connection but never answers.
+  raise RuntimeError(f'{e.reason if e.reason else e} ({req.full_url})')
+ except OSError as e: raise RuntimeError(f'{e} ({req.full_url})')
+ except ValueError as e: raise RuntimeError(f'invalid JSON from {req.full_url}: {e}')
+ entries=None
+ if isinstance(payload,list): entries=payload
+ elif isinstance(payload,dict):
+  entries=payload.get('data')
+  if entries is None: entries=payload.get('models')
+  if entries is None and payload and not ({'data','models','object','error','id'} & set(payload.keys())) and all(not isinstance(value,str) for value in payload.values()):
+   # //remarks: A bare mapping of model ID -> metadata, which some self-hosted gateways answer instead of the
+   # //remarks: OpenAI envelope. Reserved keys and string values keep an ordinary error/status object from
+   # //remarks: being mistaken for a model map.
+   entries=payload
+ if isinstance(entries,dict):
+  # //remarks: Some providers answer a bare mapping instead of the OpenAI {"data":[...]} wrapper.
+  entries=[k for k in entries.keys() if isinstance(k,str) and k.strip()]
+ if not isinstance(entries,list): return []
+ found=[]
+ for entry in entries:
+  if isinstance(entry,str): value=entry; created=0
+  elif isinstance(entry,dict): value=entry.get('id') or entry.get('name') or entry.get('model'); created=entry.get('created') or 0
+  else: continue
+  if not isinstance(value,str) or not value.strip(): continue
+  try: created=int(created)
+  except (TypeError,ValueError): created=0
+  found.append((value.strip(),created))
+ if not found: return []
+ # //remarks: Newest first (a high "created" timestamp is the only free-tier hint a generic provider gives);
+  # //remarks: providers that omit the field fall back to their own response order instead of being shuffled.
+ if all(created==0 for _,created in found): return [value for value,_ in found]
+ ranked=sorted(enumerate(found),key=lambda pair:(pair[1][1],-pair[0]),reverse=True)
+ return [pair[1][0] for pair in ranked]
+
+# //remarks: A single handshake retry covers the transient case that produced the original false "expired" report:
+# //remarks: a CDN serves a rotated edge certificate for a moment, and that one connection fails while the very
+# //remarks: next one verifies. Only transport/TLS failures are retried - an HTTP error is a real answer and is
+# //remarks: never repeated, so a rejected key cannot cost two requests. An expired certificate is not retried
+# //remarks: either, because describe_ssl_error already proved that retrying cannot help.
+def retryable_transport_error(error):
+ text=str(error)
+ if 'TLS handshake failed' in text or 'not valid for' in text or 'self-signed' in text or 'trusted root' in text: return True
+ return bool(re.search(r'HTTP \d+',text)) is False and 'invalid JSON' not in text
+
+def fetch_models(base_url,api_key,timeout=10,attempts=2):
+ last=None
+ for attempt in range(max(1,attempts)):
+  try: return fetch_models_once(base_url,api_key,timeout)
+  except Exception as e:
+   last=e
+   if attempt+1>=max(1,attempts) or not retryable_transport_error(e): raise
+   time.sleep(0.4)
+ raise last
+
+# //remarks: Certificate facts for the connected provider. Python does not retain the peer certificate once the
+# //remarks: response is closed, so a second, body-less handshake reads it and turns the leaf's not-after date into
+# //remarks: a day count. This is only ever attempted after a request already succeeded, so it can never turn a
+# //remarks: working connection into a failure.
+def tls_certificate_expiry(url,timeout=8):
+ try:
+  parts=urllib.parse.urlsplit(url if '://' in url else 'https://'+url)
+  if (parts.scheme or '').lower()!='https' or not parts.hostname: return None
+  context=ssl.create_default_context()
+  with socket.create_connection((parts.hostname,parts.port or 443),timeout) as raw:
+   with context.wrap_socket(raw,server_hostname=parts.hostname) as tls:
+    cert=tls.getpeercert() or {}
+  stamp=cert.get('notAfter')
+  if not stamp: return None
+  expires=ssl.cert_time_to_seconds(stamp)
+  return int((expires-time.time())//86400)
+ except Exception: return None
+
+# //remarks: site root without the /vN segment, because some hosts publish the list there; the first non-empty
+# //remarks: answer wins and the last error is only reported when every form failed.
+def model_list_urls(base_url):
+ base=base_url.rstrip('/')
+ # //remarks: Both forms are bare base URLs: fetch_models appends "/models" itself, so adding it here as well
+ # //remarks: produced a doubled path that matched nothing.
+ urls=[base]
+ match=re.match(r'^(.*)/v\d+(?:\.\d+)?$',base,re.I)
+ if match and match.group(1): urls.append(match.group(1))
+ return urls
+
+class ModelListLoader(threading.Thread):
+ def __init__(self,base_url,api_key):
+  super().__init__(daemon=True); self.base_url=base_url; self.api_key=api_key
+  self.list_id=None; self.list_error=None; self.list_url=''
+ def run(self):
+  last=None; errors=[]
+  for url in model_list_urls(self.base_url):
+   try:
+    ids=fetch_models(url,self.api_key)
+    self.list_url=url
+    if ids: self.list_id=ids; return
+    # //remarks: A valid but empty list is a real answer, so remaining URL forms are not probed further.
+    self.list_id=[]; return
+   except Exception as e: last=f'{url}: {e}'; errors.append((url,e))
+  # //remarks: The site-root fallback usually answers 404 by design, so reporting the *last* error hid the real one:
+  # //remarks: a 503 or a rejected key on the correct <base>/models path was replaced by a meaningless 404. The first
+  # //remarks: attempt is the OpenAI convention the user's URL describes, so its reason is the one worth showing; a
+  # //remarks: non-HTTP failure (TLS, timeout, offline) is reported verbatim because it describes the host, not a path.
+  self.list_id=[]
+  first=errors[0][1] if errors else None
+  transport=[e for _,e in errors if 'HTTP ' not in str(e)]
+  self.list_error=str(transport[0]) if transport else (str(first) if first is not None else 'model list request failed')
+  if last and self.list_error and not transport and last not in self.list_error: self.list_error=f'{self.list_error} (also tried {last})'
 
 # //remarks: A compact push button that wraps its label onto a second line instead of eliding it with
 # //remarks: "...". This keeps every action readable while the whole action row still fits one line.
@@ -211,6 +474,48 @@ def _text_crops(img):
   # //remarks: as a fallback: a missed detection must produce no OCR row, not invented dialogue.
   return [(box,img.crop(box)) for box in detect_text_regions(img)]
 
+# //remarks: PSD support for OCR. Photoshop pages are layered documents, and the detector/OCR only understands a
+# //remarks: flat raster, so a .psd has to be flattened before it can be read. Pillow's own PSD plugin is not
+# //remarks: enough: it only targets very old Photoshop files and raises UnidentifiedImageError on a 16-bit
+# //remarks: document (verified), which is the usual depth for manga artwork. psd-tools is therefore used to
+# //remarks: composite the visible layers into one page image, exactly what Photoshop shows when the file is
+# //remarks: flattened. It ships prebuilt Windows wheels, so the frozen build needs no compiler. The composited
+# //remarks: page is cached as a PNG so the same file is only flattened once per run.
+PSD_SUFFIXES=('.psd',)
+
+def is_psd(path):
+ # //remarks: Extension check only; the real content check is PSDImage.open, which raises on anything else.
+ return Path(path).suffix.lower() in PSD_SUFFIXES
+
+def flatten_psd(path,dest=None):
+ # //remarks: Flatten a layered .psd into a single page PNG and return its path. Compositing merges every
+ # //remarks: visible layer with its blend mode, opacity, and mask, so the text the OCR reads is the text that
+ # //remarks: is actually visible on the finished page - hidden construction layers never leak into OCR.
+ # //remarks: The result is converted to RGB because the detector expects 3-channel input while a PSD may be
+ # //remarks: RGBA, greyscale, CMYK, or 16-bit.
+ from psd_tools import PSDImage
+ psd=PSDImage.open(str(path))
+ try:
+  page=psd.composite()
+  if page is None: raise RuntimeError('the document has no visible pixels to composite')
+  if page.mode != 'RGB': page=page.convert('RGB')
+  target=Path(dest) if dest else Path(tempfile.mkdtemp(prefix='bluetl_psd_'))/f'{Path(path).stem}.png'
+  target.parent.mkdir(parents=True,exist_ok=True)
+  page.save(target,'PNG')
+  return str(target)
+ finally:
+  # //remarks: Release the PSD handle and its layer data promptly; a large layered file holds a lot of memory.
+  close=getattr(psd,'close',None)
+  if callable(close): close()
+
+def open_page_image(path):
+ # //remarks: Single place that turns an imported page file into a Pillow image for text detection. Ordinary
+ # //remarks: rasters open directly; a .psd is flattened first.
+ from PIL import Image
+ target=flatten_psd(path) if is_psd(path) else str(path)
+ img=Image.open(target); img.load()
+ return img
+
 def _is_blank(crop):
   # //remarks: Flat crops (empty bubble interiors, solid panel fills) contain no glyphs, and Manga OCR
   # //remarks: answers such input with invented text instead of nothing. Rejecting flat crops before the
@@ -243,6 +548,16 @@ def _suspicion(crop,text):
   if len(text)>=4 and not re.search(r'[\u3040-\u30ff\u4e00-\u9fff]',text): return 'no Japanese characters in the result'
   return ''
 
+def _page_number(name,fallback):
+  # //remarks: The page number follows the file name, so a file called "page_007.jpg" is reported as page
+  # //remarks: 7 instead of whatever position it happens to occupy in the batch. The last run of digits in
+  # //remarks: the stem wins, because manga names usually end with the page index ("ch01_p007", "007").
+  # //remarks: A name without any digits (for example "cover.jpg") has no page number of its own, so the
+  # //remarks: sequential position is used as a fallback and the row still gets a usable number.
+  stem=Path(str(name)).stem
+  groups=re.findall(r'\d+',stem)
+  return int(groups[-1]) if groups else fallback
+
 def _name_key(value):
   # //remarks: Natural sort key for file names: "p9" must come before "p10", whereas plain text
   # //remarks: sorting put "p10" between "p1" and "p2". Splitting on runs of digits keeps strings at
@@ -262,16 +577,117 @@ class Window(QMainWindow):
    self.review_dir=''
    # //remarks: Tracks the model that last answered a request; used in the API status tooltip.
    self.last_model=''
+   # //remarks: Model-list discovery state: the last successfully fetched list is cached in the settings file,
+   # //remarks: the debounce timer keeps keystrokes in the Base URL field from firing one request per character,
+   # //remarks: and the refresh lock prevents a second queued refresh from starting while one is already waiting.
+   self.model_cache=[]
+   self.model_timer=QTimer(self); self.model_timer.setSingleShot(True); self.model_timer.setInterval(700)
+   self.model_timer.timeout.connect(lambda: self.refresh_models(manual=False))
+   self.model_refreshing=False
+   # //remarks: Result collection for the discovery worker: the poll timer ticks while a fetch is in flight and
+   # //remarks: poll_models() finishes the step once the worker is done or the wall-clock deadline passed.
+   self.model_loader=None; self.model_url=''; self.model_deadline=0.0; self.model_manual=False; self.model_key=''; self.model_verify=False; self.model_check=False; self.model_request=('','')
+   # //remarks: The key used for the fetch and whether that fetch is the explicit Save & Connect press, which is the
+   # //remarks: only path allowed to spend a completion proving the key.
+   # //remarks: URL edited while a fetch was already in flight; poll_models() runs it right after the current
+   # //remarks: request finishes, so a corrected Base URL is never left with the previous provider's models.
+   self.model_pending=''
+   self.model_poll=QTimer(self); self.model_poll.setInterval(100)
+   self.model_poll.timeout.connect(self.poll_models)
+   # //remarks: Base URL whose list was last fetched, so a redundant re-fetch (for example typing and then
+   # //remarks: undoing the edit) is skipped and auto-discovery stays quiet.
+   self.refreshed=''
+   # //remarks: Cline-style confirmation gate. The Base URL and API key are typed as a *draft* and are not used
+   # //remarks: until the user presses Save & Connect. self.connected_url/connected_key hold the values that were
+   # //remarks: actually confirmed; the model dropdown stays disabled until a list has been fetched for them. A
+   # //remarks: later edit to either field makes the connection stale, so the button reactivates and the user
+   # //remarks: re-confirms instead of the app silently talking to a provider they did not intend.
+   self.connected_url=''; self.connected_key=''
+   # //remarks: (profile key, API key) of the last model fetch that succeeded; only that pair is ever written to disk.
+   self.fetched=('','')
+   # //remarks: Remembered providers, keyed by Base URL (see profile_key). A provider enters this map only after its
+   # //remarks: key worked, which is what lets the user switch between several Base URLs without retyping anything
+   # //remarks: and without a saved key ever being offered to the wrong host.
+   self.profiles={}
+   # //remarks: A provider's /models catalogue is public at some hosts (it answers 200 without a key), so a fetched
+   # //remarks: list proves the URL, not the key. The Model dropdown therefore stays locked until a real key check
+   # //remarks: succeeds - Test API, or the one-token probe that Save & Connect runs when the list has no models to
+   # //remarks: probe. self.api_verified records the profile key that passed.
+   self.api_verified=''
+   # //remarks: Days left on the provider's certificate, filled in after a successful fetch. A known expiry is worth
+   # //remarks: showing, because the failure it prevents (a silently renewed-then-lapsed certificate) is exactly the
+   # //remarks: one that produced the original false "expired SSL" report.
+   self.cert_days=None
+   # //remarks: Set while load() fills the fields from the settings file, so the provider-restore handler does not
+   # //remarks: undo the restored selection or fight the startup refresh.
+   self.restoring=False
    icon_path=asset_path('bluetl.ico')
    if icon_path.is_file(): self.setWindowIcon(QIcon(str(icon_path)))
    self.ui(); self.load()
  def ui(self):
   w=QWidget(); v=QVBoxLayout(w); f=QFormLayout()
-  self.url=QLineEdit('https://serveras.click/v1'); self.url.setPlaceholderText('https://serveras.click/v1')
+  # //remarks: Placeholder only - no provider URL or key is compiled into the executable, so the field starts
+  # //remarks: empty and the user's own provider is remembered in the settings file instead.
+  self.url=QLineEdit(); self.url.setPlaceholderText('https://your-provider.example/v1')
   self.key=QLineEdit(); self.key.setEchoMode(QLineEdit.Password); self.key.setPlaceholderText('API key')
-  self.model=QComboBox(); self.model.setEditable(True); self.model.addItems(MODELS); self.model.setCurrentText(MODELS[0]); self.model.setToolTip('The selected model is tried first; remaining models are automatic fallbacks.')
+  self.model=QComboBox(); self.model.setEditable(True); self.model.setToolTip('Selects the model tried first; remaining models in the list are automatic fallbacks. The list is fetched from your Base URL after you press Save & Connect.')
+  # //remarks: Free models only sits directly under the model picker, as requested. Ticking it narrows the
+  # //remarks: dropdown to the fetched model IDs that contain the text "free"; unticking restores the full
+  # //remarks: provider list. The filter is applied to the cached list, so toggling it costs no network call.
+  self.free_only=QCheckBox('Free models only'); self.free_only.setToolTip('Show only the models whose ID contains the text "free" (searched in the list fetched from your Base URL).')
+  self.free_only.toggled.connect(self.on_free_only_toggled)
   self.lang=QComboBox(); self.lang.addItems(LANGS)
-  for label,x in [('OpenAI-compatible Base URL',self.url),('API key',self.key),('Model',self.model),('Target language',self.lang)]: f.addRow(label,x)
+  # //remarks: The saved-provider picker makes the remembered providers reachable: choosing an entry fills in that
+  # //remarks: provider's Base URL, its DPAPI-protected key, and its cached model list, so switching between several
+  # //remarks: providers needs no retyping. Only providers whose key was proved are listed.
+  self.provider=QComboBox(); self.provider.setToolTip('Saved providers. Choosing one fills in its Base URL and API key, then re-fetches its model list.')
+  self.provider.activated.connect(self.on_provider_chosen)
+  # //remarks: Cline-style layout. The connection fields are one group that the user fills in and then confirms
+  # //remarks: with Save & Connect, exactly like Cline's provider panel: enter the Base URL and API key, press Save
+  # //remarks: & Connect, and only then is the provider contacted. Nothing is sent while the user is still typing.
+  self.delete_provider_button=QPushButton('Delete'); self.delete_provider_button.setToolTip('Remove the saved provider that matches the Base URL on screen, together with its stored API key and model list.')
+  self.delete_provider_button.clicked.connect(self.delete_provider)
+  provider_row=QWidget(); pr=QHBoxLayout(provider_row); pr.setContentsMargins(0,0,0,0); pr.addWidget(self.provider,1); pr.addWidget(self.delete_provider_button)
+  for label,x in [('Saved providers',provider_row),('OpenAI-compatible Base URL',self.url),('API key',self.key)]: f.addRow(label,x)
+  self.connect_button=QPushButton('Save & Connect')
+  self.connect_button.setToolTip('Confirm the Base URL and API key. Pressing this fetches the full model list from the provider and, once the key is proved, enables the Model dropdown.')
+  self.connect_button.clicked.connect(self.confirm_connection)
+  self.connect_status=QLabel(); self.connect_status.setTextFormat(Qt.PlainText)
+  conn_row=QHBoxLayout(); conn_row.addWidget(self.connect_button); conn_row.addWidget(self.connect_status,1)
+  f.addRow('',conn_row)
+  # //remarks: Everything below this line describes the *confirmed* provider. The Model dropdown stays disabled
+  # //remarks: until Save & Connect has produced a list and the key has been proved, so a model can never be chosen
+  # //remarks: for a provider that has not answered - the same order of steps Cline uses.
+  for label,x in [('Model',self.model),('',self.free_only),('Target language',self.lang)]: f.addRow(label,x)
+  # //remarks: Refresh models sits on the same row as the Model picker (as requested), so the list and the action
+  # //remarks: that updates it read as one control group. The list is still fetched from the provider's own /models
+  # //remarks: endpoint, so testers pick their provider's models instead of any hard-coded list, and the button lets
+  # //remarks: them re-fetch on demand (after changing the key, or when a fetch timed out).
+  self.refresh_button=QPushButton('Refresh models'); self.refresh_button.setToolTip('Re-fetch the model list from the confirmed Base URL.')
+  self.refresh_button.clicked.connect(lambda: self.refresh_models(manual=True))
+  self.refresh_button.setEnabled(False)
+  # //remarks: The Model row is taken out of the form and put back inside one widget that holds the picker and the
+  # //remarks: Refresh button side by side, which keeps the label column aligned with every other row.
+  model_row=f.takeRow(4)
+  holder=QWidget(); model_line=QHBoxLayout(holder); model_line.setContentsMargins(0,0,0,0)
+  # //remarks: takeRow() returns layout *items*, not widgets, so each side is unwrapped with .widget(). Either side can
+  # //remarks: be None (a row may hold a nested row instead of a widget), which is why both are checked.
+  model_field=model_row.fieldItem.widget() if model_row.fieldItem is not None else None
+  model_line.addWidget(model_field,1) if model_field is not None else None
+  model_line.addWidget(self.refresh_button)
+  model_label_item=model_row.labelItem
+  model_label=model_label_item.widget().text() if model_label_item is not None and model_label_item.widget() is not None else 'Model'
+  f.insertRow(4,model_label,holder)
+  # //remarks: Editing either connection field does NOT fire a request any more. It only marks the saved
+  # //remarks: connection stale, which re-enables Save & Connect, locks the model list, and - when the Base URL
+  # //remarks: itself changed - clears the previous provider's selection so a stale model can never be sent to a
+  # //remarks: different host.
+  self.url.textEdited.connect(lambda _: self.on_connection_edited())
+  self.key.textEdited.connect(lambda _: self.on_connection_edited())
+  # //remarks: Also watch programmatic changes (choosing a saved provider, restoring the settings file, pasting a
+  # //remarks: URL) so the model list always belongs to the URL currently in the field, not only when a keystroke
+  # //remarks: produced the change.
+  self.url.textChanged.connect(lambda _: self.on_url_changed())
   v.addLayout(f)
   # //remarks: Two always-visible status pills remove the "did it work?" ambiguity:
   # //remarks: tick = verified, cross = failed, dash = not checked yet. They start neutral
@@ -287,11 +703,11 @@ class Window(QMainWindow):
   # //remarks: the window without the window having to grow. A label that is still too wide wraps onto
   # //remarks: a second line inside its own button instead of being clipped.
   b=QHBoxLayout()
-  for text,fn in [('Import',self.images),('Recognize OCR',self.recognize),('Add row',self.add),('Delete row',self.delete),('Translate all',self.all),('Test API',self.test_api),('Export TXT',self.txt),('Export DOCX',self.docx)]:
+  for text,fn in [('Import',self.images),('Recognise OCR',self.recognize),('Add row',self.add),('Delete row',self.delete),('Translate all',self.all),('Test API',self.test_api),('Export TXT',self.txt),('Export DOCX',self.docx)]:
    q=WrapButton(text); q.clicked.connect(fn); b.addWidget(q)
    # //remarks: Keep the step-specific buttons addressable: recognition is its own action and manual
    # //remarks: row insertion waits for it.
-   if text=='Recognize OCR': self.ocr_button=q
+   if text=='Recognise OCR': self.ocr_button=q
    elif text=='Add row': self.add_button=q
    elif text=='Delete row': self.delete_button=q
   v.addLayout(b)
@@ -303,7 +719,7 @@ class Window(QMainWindow):
   # //remarks: reflow onto multiple lines so nothing is cut off horizontally.
   # //remarks: The Review column shows the suspicion check result, so an invented line is visible in the
   # //remarks: table instead of being trusted silently.
-  self.table=QTableWidget(0,5); self.table.setHorizontalHeaderLabels(['Page','Panel','Recognized text','Translation','Review'])
+  self.table=QTableWidget(0,5); self.table.setHorizontalHeaderLabels(['Page','Panel','Recognised text','Translation','Review'])
   self.table.setWordWrap(True)
   self.table.setAlternatingRowColors(True)
   self.table.horizontalHeader().setSectionResizeMode(2,QHeaderView.Stretch); self.table.horizontalHeader().setSectionResizeMode(3,QHeaderView.Stretch); self.table.horizontalHeader().setSectionResizeMode(4,QHeaderView.ResizeToContents)
@@ -316,22 +732,82 @@ class Window(QMainWindow):
   self.progress=QProgressBar(); self.progress.setRange(0,1); self.progress.setValue(0)
   self.progress.setTextVisible(True); self.progress.setFormat('%v/%m'); self.progress.setMaximumHeight(18)
   self.progress.setVisible(False); v.addWidget(self.progress)
-  self.status=QLabel('Import images, then click Recognize OCR to load the text lines.')
+  self.status=QLabel('Import images, then click Recognise OCR to load the text lines.')
   # //remarks: Filenames are echoed in status messages, so keep this label plain text: a file named
   # //remarks: with '<' or '&' must never be parsed as rich text markup.
   self.status.setTextFormat(Qt.PlainText); v.addWidget(self.status)
-  tabs=QTabWidget(); tabs.addTab(w,'Translator'); about=QWidget(); av=QVBoxLayout(about); av.addWidget(QLabel('<h2>BlueTL</h2><p>Version v1.0</p><p>Published by borneanwingz.fl</p><p>Author: Blue-Wingz @ facedesk</p>')); av.addStretch(); tabs.addTab(about,'About'); self.setCentralWidget(tabs)
+  tabs=QTabWidget(); tabs.addTab(w,'Translator'); about=QWidget(); av=QVBoxLayout(about); av.addWidget(QLabel('<h2>BlueTL</h2><p>Version v1.0.1</p><p>Published by borneanwingz.fl</p><p>Author: Blue-Wingz @ facedesk</p>')); av.addStretch(); tabs.addTab(about,'About'); self.setCentralWidget(tabs)
   # //remarks: Apply the starting button state once the widgets exist.
   self.update_actions()
  def load(self):
   try:
-   d=json.loads(CFG.read_text()); self.url.setText(d.get('url','https://serveras.click/v1')); self.model.setCurrentText(d.get('model',MODELS[0])); self.lang.setCurrentText(d.get('language',LANGS[0])); self.key.setText(unprotect(d.get('api_key','')))
+   # //remarks: Read with an explicit UTF-8 encoding, matching save(): the config is written with
+   # //remarks: ensure_ascii=False, so any non-ASCII character (a provider name, a path with an accent) lands in
+   # //remarks: the file as real UTF-8 bytes. Reading it with the Windows locale default (cp1252) raised
+   # //remarks: UnicodeDecodeError on byte 0x81 and made the app unstartable, so the encoding is always stated.
+   d=json.loads(CFG.read_text(encoding='utf-8'))
+   # //remarks: Restore everything the user entered, because none of it is compiled into the executable:
+   # //remarks: the Base URL, the DPAPI-protected API key, the chosen model, and the Free models only state.
+   # //remarks: Missing keys fall back to an empty field rather than to a baked-in provider.
+   # //remarks: Field changes are blocked while the stored values go in, so nothing reacts to a half-restored
+   # //remarks: screen: the URL handler would otherwise clear a selection that is about to be restored as well.
+   self.restoring=True
+   self.url.blockSignals(True); self.key.blockSignals(True)
+   self.url.setText(d.get('url','')); self.key.setText(unprotect(d.get('api_key','')))
+   self.url.blockSignals(False); self.key.blockSignals(False)
+   # //remarks: The tick box state is restored before the list is rebuilt, so the dropdown comes back filtered
+   # //remarks: exactly as the user left it instead of flashing the full list first.
+   self.free_only.blockSignals(True); self.free_only.setChecked(bool(d.get('free_only',False))); self.free_only.blockSignals(False)
+   self.lang.setCurrentText(d.get('language',LANGS[0]))
+   # //remarks: Restore the last fetched model list before the network is asked again, so a tester who is
+   # //remarks: offline (or whose provider is slow) still sees their own provider's models straight away.
+   cache=d.get('models')
+   if isinstance(cache,list): self.model_cache=[m for m in cache if isinstance(m,str) and m.strip()]
+   self.set_models(self.model_cache)
+   # //remarks: The remembered model is applied after the list is rebuilt, so a typed ID that is not in the
+   # //remarks: cached list is still restored as the current selection instead of being replaced by the first entry.
+   saved_model=str(d.get('model','')).strip()
+   if saved_model:
+    self.model.blockSignals(True); self.model.setCurrentText(saved_model); self.model.blockSignals(False)
+   # //remarks: Remembered providers come back as a list to choose from, so a user with several Base URLs can switch
+   # //remarks: without retyping a key. The rebuild itself happens after the handler, so it also runs on a first launch
+   # //remarks: where there is no settings file at all.
+   self.profiles=load_profiles(d)
+   current_key=profile_key(self.url.text())
+   if current_key and current_key not in self.profiles and self.url.text().strip():
+    self.profiles[current_key]={'url':self.url.text().strip(),'api_key':d.get('api_key','') if isinstance(d.get('api_key'),str) else '','verified':False,'model':saved_model,'models':self.model_cache}
+   # //remarks: A remembered provider counts as proved only if the settings file recorded a successful key check for
+   # //remarks: it, so a restarted app never inherits a verification that belongs to different credentials.
+   active=self.profiles.get(current_key)
+   if active and active.get('verified'): self.api_verified=current_key
+   # //remarks: A key is only ever stored after a successful model fetch, so a restored key counts as fetched.
+   if active and active.get('api_key'): self.fetched=(current_key,self.key.text().strip())
    # //remarks: Keep the remembered path even when the folder is temporarily unavailable: QFileDialog falls
    # //remarks: back safely on its own, while clearing it here made BlueTL forget the last import directory
    # //remarks: after a network drive was disconnected or a removable drive was briefly unavailable.
    saved=str(d.get('last_dir','')).strip()
    self.last_dir=saved
-  except (FileNotFoundError,json.JSONDecodeError,OSError): pass
+   # //remarks: A damaged config must never stop the app from starting. UnicodeDecodeError is a ValueError (not
+   # //remarks: an OSError), so it is named explicitly: an unreadable file - wrong encoding, half-written, or a
+   # //remarks: corrupt entry - is treated like a missing one and the user simply re-enters their provider.
+  except (FileNotFoundError,json.JSONDecodeError,UnicodeDecodeError,OSError,ValueError,TypeError): pass
+  self.restoring=False
+  # //remarks: The picker is built once, outside the handler, so a first launch and a damaged config both still show
+  # //remarks: the placeholder instead of an empty combo box that looks broken.
+  self.refresh_provider_list()
+  # //remarks: A config is only "connected" when it already holds both a Base URL and a key, which happens after a
+  # //remarks: previous Save & Connect. Restoring it lets a returning user see their models straight away without
+  # //remarks: having to confirm again; a fresh or cleared config stays unconfirmed and the dropdown stays locked.
+  if self.url.text().strip() and self.key.text().strip():
+   self.connected_url=self.url.text().strip(); self.connected_key=self.key.text().strip()
+  # //remarks: Apply the restored list, then render the gate. The model list is refreshed on startup only when a
+  # //remarks: connection was already confirmed, so the app never contacts a provider the user has not saved.
+  self.set_models(self.model_cache); self.apply_connection_state()
+  if self.connected_url: self.model_timer.start()
+  # //remarks: Switching the filter on with nothing cached yet is reported honestly instead of leaving the user
+  # //remarks: wondering why the dropdown is empty: the models appear once the provider answers.
+  if self.free_only.isChecked() and self.model.count()==0 and not self.connected_url:
+   self.status.setText('Enter your Base URL and API key, then press Save & Connect: the model list is fetched from your provider.')
  def ocr_dependency_hint(self):
   return 'Install or repair dependencies with:\npython -m pip install -r requirements.txt\n\nPython: '+sys.executable
 
@@ -350,7 +826,26 @@ class Window(QMainWindow):
 
  def save(self):
   CFG.parent.mkdir(parents=True,exist_ok=True)
-  data={'url':self.url.text().strip(),'model':self.model.currentText().strip(),'language':self.lang.currentText(),'api_key':protect(self.key.text()),'last_dir':self.last_dir}
+  # //remarks: Everything the user entered is stored, because nothing is hard-coded in the executable: the
+  # //remarks: Base URL and model, the DPAPI-protected API key, and the Free models only state. The full fetched
+  # //remarks: model list is stored too (capped so a huge provider catalogue cannot bloat the config file);
+  # //remarks: model_cache always holds the complete list, never the filtered view, so unticking the box can
+  # //remarks: restore every model offline. This is what makes the settings survive reopening the EXE.
+  url=self.url.text().strip()
+  # //remarks: The key is persisted only once a model fetch with exactly this URL and key succeeded. Otherwise the
+  # //remarks: previously stored key for this provider (if any) is kept, so a mistyped key never overwrites a good one.
+  if self.key.text() and self.fetched==(profile_key(url),self.key.text().strip()): cipher=protect(self.key.text())
+  else:
+   old=self.profiles.get(profile_key(url)) if isinstance(self.profiles,dict) else None
+   cipher=old.get('api_key','') if old and isinstance(old.get('api_key'),str) else ''
+  data={'url':url,'model':self.model.currentText().strip(),'language':self.lang.currentText(),'api_key':cipher,'free_only':self.free_only.isChecked(),'last_dir':self.last_dir,'models':self.model_cache[:500],'providers':dict(self.profiles) if isinstance(self.profiles,dict) else {}}
+  # //remarks: The active provider also lives in the provider map, so switching away and back restores its own key,
+  # //remarks: model list, and verified state instead of the last one written. A provider is only recorded as verified
+  # //remarks: while it is still the confirmed connection and the key that was proved is the key on screen.
+  if url:
+   verified=bool(profile_key(url)==self.api_verified and profile_key(url)==profile_key(self.connected_url or url) and self.key.text().strip()==self.connected_key)
+   remember_profile(data,url,cipher,models=self.model_cache,verified=verified,model=data['model'])
+   self.profiles=load_profiles(data)
   # //remarks: Write to a temporary file first and then replace the real one, so an interrupted write can
   # //remarks: never leave a truncated config behind. A damaged config would lose the remembered folder
   # //remarks: and every other setting, which is exactly what this backup-and-swap prevents.
@@ -358,11 +853,393 @@ class Window(QMainWindow):
   tmp.write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding='utf-8')
   tmp.replace(CFG)
  def closeEvent(self,event):
+  # //remarks: Pending discovery work (a queued debounce tick or an in-flight poll) would only start steps for a
+  # //remarks: window that is already closing, and a live timer can keep the process alive, so both are stopped
+  # //remarks: as part of shutdown.
+  self.model_timer.stop(); self.model_poll.stop()
   try: self.save()
   except Exception as e: self.status.setText(f'Could not save settings: {e}')
   event.accept()
  def candidates(self):
   return self.ranked(self.model.currentText().strip())
+ def probe_model(self,models=None):
+  # //remarks: The model used for the one-token key check: preferably a free model, because the check itself must
+  # //remarks: cost as little as possible, then the saved selection, then whatever the provider listed first. This
+  # //remarks: mirrors the translation retry order without needing the dropdown to be unlocked first.
+  listed=filter_models(models if models is not None else self.model_cache)
+  saved=self.model.currentText().strip()
+  for candidate in ([saved] if saved else [])+[m for m in listed if is_free_model(m)]+listed:
+   if candidate: return candidate
+  return ''
+ def select_provider(self,url):
+  # //remarks: Keep the picker showing the provider currently in the fields, without emitting activated (which would
+  # //remarks: re-enter on_provider_chosen and reload from the same entry). An unknown URL falls back to the
+  # //remarks: placeholder, so the picker never claims a provider that is not saved.
+  key=profile_key(url)
+  index=self.provider.findData(key) if key else -1
+  self.provider.blockSignals(True); self.provider.setCurrentIndex(index if index>=0 else 0); self.provider.blockSignals(False)
+ def refresh_provider_list(self):
+  # //remarks: Rebuild the saved-provider entries after a new provider is remembered or an existing one is proved.
+  # //remarks: The selection is kept on the URL in the fields, so the picker never jumps to another provider.
+  current=self.url.text()
+  self.provider.blockSignals(True); self.provider.clear(); self.provider.addItem(PLACEHOLDER_PROVIDER)
+  for key in sorted(self.profiles,key=lambda k:self.profiles[k]['url'].lower()):
+   entry=self.profiles[key]
+   self.provider.addItem((PROVIDER_VERIFIED+entry['url']) if entry.get('verified') else (PROVIDER_UNVERIFIED+entry['url']),key)
+  self.provider.blockSignals(False)
+  self.select_provider(current)
+ def on_provider_chosen(self,index):
+  # //remarks: Switching providers is a two-step action like a fresh connect: the stored URL, key, and model list are
+  # //remarks: filled in, the connection is marked unconfirmed, and then the list is re-fetched. The stored key is only
+  # //remarks: reused for the URL it was saved for, so it can never be offered to a different host.
+  entry=self.provider.itemData(index) if index>0 else None
+  if not entry:
+   # //remarks: The placeholder is informational only; returning keeps the current provider in the fields instead of
+   # //remarks: clearing them, so an accidental click on it cannot wipe a working configuration.
+   return
+  saved=self.profiles.get(entry)
+  if not saved: self.provider.setCurrentIndex(0); return
+  self.restoring=True
+  self.url.setText(saved.get('url','')); self.key.setText(unprotect(saved.get('api_key','')))
+  self.restoring=False
+  self.model_cache=list(saved.get('models') or [])
+  self.refreshed=''
+  self.model.setEnabled(False); self.refresh_button.setEnabled(False)
+  self.model.blockSignals(True); self.set_models(self.model_cache,keep_current=False)
+  chosen=str(saved.get('model') or '').strip()
+  self.model.setCurrentText(chosen or (self.model.itemText(0) if self.model.count() else ''))
+  self.model.blockSignals(False)
+  self.connect_status.setText(f'Loaded {saved["url"]} - press Save & Connect to reconnect.' if self.api_verified!=profile_key(saved['url']) else 'Connecting...')
+  self.connect_status.setStyleSheet('color:#b45309;padding:2px 2px;')
+  self.connect_button.setEnabled(True)
+  self.status.setText(f'Provider selected: {saved["url"]}. Press Save & Connect to fetch its model list.')
+ def delete_provider(self):
+  # //remarks: Removes the saved provider matching the Base URL on screen. If it is the active connection the fields,
+  # //remarks: model list and verified state are cleared too, so nothing of the deleted provider remains in use.
+  key=profile_key(self.url.text())
+  if not key or key not in self.profiles:
+   self.status.setText('No saved provider matches the Base URL on screen.'); return
+  url=self.profiles[key]['url']
+  del self.profiles[key]
+  if self.fetched[0]==key: self.fetched=('','')
+  if self.api_verified==key: self.api_verified=''
+  self.restoring=True
+  self.url.clear(); self.key.clear()
+  self.restoring=False
+  self.connected_url=''; self.connected_key=''; self.refreshed=''; self.model_cache=[]
+  self.model.blockSignals(True); self.set_models([],keep_current=False); self.model.setCurrentText(''); self.model.blockSignals(False)
+  self.model.setEnabled(False); self.refresh_button.setEnabled(False); self.connect_button.setEnabled(True)
+  self.connect_status.setText('Not confirmed - press Save & Connect to load models.'); self.connect_status.setStyleSheet('color:#b45309;padding:2px 2px;')
+  self.refresh_provider_list()
+  try: self.save()
+  except Exception as e: self.status.setText(f'Could not save settings: {e}'); return
+  self.status.setText(f'Deleted saved provider {url}.')
+ def on_url_changed(self):
+  # //remarks: The Model dropdown must never carry one provider's selection into another provider's session, so a
+  # //remarks: changed Base URL clears the selection and the cached list unless that URL is a remembered provider,
+  # //remarks: whose own list and model are restored instead. This runs for typed *and* programmatic changes, which is
+  # //remarks: what makes a pasted URL behave exactly like an edited one.
+  if self.restoring: return
+  url=self.url.text().strip()
+  self.select_provider(url)
+  entry=self.profiles.get(profile_key(url)) if url else None
+  # //remarks: A remembered provider always gets its own catalogue back, even when the text matches the connection that
+  # //remarks: is still recorded: an edit away and back must not leave the dropdown showing another provider's list.
+  if entry:
+   # //remarks: The comparison is against the provider's own stored list, never against the live cache: the cache was
+   # //remarks: just emptied by the step that moved to this URL, so comparing with it would skip the restore.
+   stored=list(entry.get('models') or [])
+   if stored!=list(self.model_cache) or not self.model.count():
+    self.model_cache=stored
+    self.model.blockSignals(True); self.set_models(self.model_cache,keep_current=False)
+    saved=str(entry.get('model') or '').strip()
+    self.model.setCurrentText(saved or (self.model.itemText(0) if self.model.count() else ''))
+    self.model.blockSignals(False)
+  if url==self.connected_url:
+   if self.same_connection(url,self.key.text().strip()): self.apply_connection_state()
+   return
+  if entry:
+   if entry.get('verified') and self.api_verified==profile_key(url): self.connected_url=url; self.connected_key=self.key.text().strip(); self.apply_connection_state()
+   return
+  # //remarks: An unknown URL is a fresh provider: nothing from the previous one survives, and the dropdown is locked
+  # //remarks: until Save & Connect proves the new connection.
+  if self.model_cache or self.model.count():
+   self.model_cache=[]
+   self.model.blockSignals(True); self.set_models([],keep_current=False); self.model.setCurrentText(''); self.model.blockSignals(False)
+  self.api_verified=''
+  if not self.model_refreshing: self.on_connection_edited()
+ def set_models(self,ids,keep_current=True):
+  # //remarks: Rebuild the editable Model dropdown from the fetched (or restored) list. The custom text the
+  # //remarks: user typed is put back as the current selection, so a non-listed ID - an Azure deployment name,
+  # //remarks: for example - is never replaced by whatever happens to be first in the list. It is also kept as a
+  # //remarks: dropdown entry, so a typed ID is visible and selectable again after a refresh or a restart.
+  # //remarks: Signal blocking keeps this UI refresh from touching the debounce timer or the saved selection.
+  # //remarks: Nothing is hard-coded here: with no fetched list and no typed ID the dropdown is simply empty,
+  # //remarks: which is the honest state before a Base URL and key have produced a real provider catalogue.
+  # //remarks: keep_current=False is used when the list belongs to a *different* provider: the previous provider's
+  # //remarks: selection must not be carried over, so the dropdown is rebuilt from the new list alone.
+  current=self.model.currentText().strip() if keep_current else ''
+  free_only=self.free_only.isChecked()
+  merged=[]
+  # //remarks: A typed ID is honoured as-is even while the free-only filter is on, because the user is
+  # //remarks: explicitly choosing it and silently dropping it would lose their selection.
+  for value in filter_models(list(ids or [])+([current] if current else []),free_only):
+   if value not in merged: merged.append(value)
+  self.model.blockSignals(True)
+  self.model.clear(); self.model.addItems(merged)
+  self.model.blockSignals(False)
+  # //remarks: Restoring the current text is blocked from signals so it cannot re-trigger the debounce timer,
+  # //remarks: while still putting the user's choice back exactly as it was.
+  self.model.blockSignals(True); self.model.setCurrentText(current or (merged[0] if merged else '')); self.model.blockSignals(False)
+ def on_free_only_toggled(self,checked):
+  # //remarks: Toggling the tick box re-applies the filter to the cached provider list - no network request, so
+  # //remarks: the choice is instant even offline. The cached list stays complete, so unticking restores every
+  # //remarks: model the provider reported.
+  self.set_models(self.model_cache)
+  count=self.model.count()
+  if checked: self.status.setText(f'Free models only: showing {count} model(s) whose ID contains "{FREE_MODEL_TOKEN}".')
+  else: self.status.setText(f'Free models only off: showing {count} model(s) from the fetched list.')
+  self.save()
+ def on_connection_edited(self):
+  # //remarks: The user changed a connection field after confirming (or before doing so). No request is sent:
+  # //remarks: the previous confirmation no longer describes what is on screen, so Save & Connect is re-enabled,
+  # //remarks: Refresh is disabled, and the model dropdown is locked until the new values are confirmed. Editing only
+  # //remarks: the key keeps the cached list, because the same provider simply needs a new key; editing the Base URL
+  # //remarks: is handled by on_url_changed, which clears or restores the list for whichever provider is now in the
+  # //remarks: field so a model from one provider is never sent to another.
+  if self.model_refreshing or self.restoring: return
+  if self.same_connection(self.url.text().strip(),self.key.text().strip()):
+   # //remarks: The text was edited back to the exact confirmed values, so the connection is valid again.
+   self.apply_connection_state()
+   return
+  self.refresh_provider_list()
+  self.connect_button.setEnabled(True)
+  self.connect_status.setText('Not confirmed - press Save & Connect to reload models.')
+  self.connect_status.setStyleSheet('color:#b45309;padding:2px 2px;')
+  self.model.setEnabled(False); self.refresh_button.setEnabled(False)
+ def same_connection(self,url,key):
+  # //remarks: A connection is current only when both fields still equal what was confirmed. The key is compared
+  # //remarks: as typed, because a re-typed key is a genuinely different credential even if it looks similar.
+  return bool(self.connected_url) and url==self.connected_url and key==self.connected_key
+ def apply_connection_state(self):
+  # //remarks: Single place that renders the confirmed/unconfirmed state. Confirmed means the provider answered, the
+  # //remarks: key on screen is the one that was proved, and the dropdown holds real model IDs; only then can a model
+  # //remarks: be picked. Requiring the key check matters because some hosts serve /models publicly, so a fetched list
+  # //remarks: alone would let a wrong key look connected until the first translation failed.
+  url=self.url.text().strip(); key=self.key.text().strip()
+  if self.same_connection(url,key):
+   if profile_key(url)!=self.api_verified or not key:
+    self.connect_button.setEnabled(False)
+    self.connect_status.setText('Model list loaded - press Test API once to verify the API key.')
+    self.connect_status.setStyleSheet('color:#b45309;padding:2px 2px;')
+    self.model.setEnabled(False); self.refresh_button.setEnabled(True)
+    return
+   count=self.model.count()
+   self.connect_button.setEnabled(False)
+   self.connect_status.setText(f'Connected - {count} model(s) available and API key verified.' if count else 'Connected - provider reported no models; type a model ID.')
+   self.connect_status.setStyleSheet('color:#1a7f37;padding:2px 2px;')
+   self.connect_status.setToolTip(CERT_NOTE.format(days=self.cert_days) if isinstance(self.cert_days,int) and self.cert_days>=0 else 'The provider answered and the API key was verified.')
+   self.model.setEnabled(True); self.refresh_button.setEnabled(True)
+  else:
+   self.connect_button.setEnabled(True)
+   self.connect_status.setText('Not confirmed - press Save & Connect to load models.')
+   self.connect_status.setStyleSheet('color:#b45309;padding:2px 2px;')
+   self.model.setEnabled(False); self.refresh_button.setEnabled(False)
+ def confirm_connection(self):
+  # //remarks: The explicit confirmation step, mirroring Cline's Done: take the typed Base URL and API key as the
+  # //remarks: active connection, then fetch the full model list. Validation happens here, once, with a clear
+  # //remarks: message - never silently while the user is still typing.
+  url=self.url.text().strip(); key=self.key.text().strip()
+  missing=[]
+  if not url: missing.append('Base URL')
+  if not key: missing.append('API key')
+  if missing:
+   QMessageBox.warning(self,'Connection details required',f'Enter the {" and ".join(missing)} before connecting.')
+   return
+  # //remarks: Both fields are kept exactly as typed (normalized_url only shapes the request URL), so a provider
+  # //remarks: whose working endpoint has no version segment keeps receiving the user's own text.
+  previous=profile_key(self.connected_url); previous_key=self.connected_key
+  self.connected_url=url; self.connected_key=key
+  self.connect_button.setEnabled(False)
+  self.connect_status.setText('Connecting...'); self.connect_status.setStyleSheet('color:#6b7280;padding:2px 2px;')
+  # //remarks: Persist immediately so a confirmed provider URL survives a restart even if the fetch then fails; save()
+  # //remarks: leaves the typed key out until a fetch with it succeeds. The save
+  # //remarks: happens before the verified state is dropped for a new key, so the provider that was proved a moment ago
+  # //remarks: keeps its record; only the in-memory verification is cleared, which is what locks the dropdown.
+  try: self.save()
+  except Exception as e: self.status.setText(f'Could not save settings: {e}')
+  # //remarks: A key check belongs to one Base URL and one key. Confirming a different provider, or the same provider
+  # //remarks: with a different key, therefore drops the in-memory verified state instead of inheriting it, which keeps
+  # //remarks: the dropdown locked; the fetch that follows proves the new key and remembers the provider again.
+  if profile_key(url)!=previous or key!=previous_key: self.api_verified=''
+  self.refresh_provider_list()
+  self.refreshed=''
+  self.refresh_models(manual=True,url=normalized_url(url),key=key,verify_key=True)
+ def refresh_models(self,manual=False,url=None,key=None,verify_key=False):
+  # //remarks: Re-fetch the provider's model list from its /models endpoint and refresh the dropdown. The
+  # //remarks: network work happens on a worker thread and this method only starts it; a small poll timer
+  # //remarks: collects the result, so an unreachable host delays nothing and the window never freezes or runs
+  # //remarks: a nested event loop. A manual refresh is the only path that reports the reason for failure; an
+  # //remarks: automatic refresh stays silent and simply keeps the current list - OCR and translation are never
+  # //remarks: affected by discovery.
+  # //remarks: Refresh only ever acts on a CONFIRMED connection. Without one there is nothing trustworthy to ask:
+  # //remarks: the user must press Save & Connect first, which is the Cline-style step this app mirrors.
+  if url is None: url=normalized_url(self.connected_url or self.url.text())
+  if key is None: key=self.connected_key or self.key.text().strip()
+  if not url:
+   if manual: QMessageBox.warning(self,'Base URL required','Enter the OpenAI-compatible Base URL first, then press Save & Connect.')
+   return
+  # //remarks: The Base URL field is deliberately NOT rewritten here: normalized_url only shapes the request URL
+  # //remarks: for discovery, and the translation client must keep receiving exactly the text the tester typed.
+  # //remarks: Editing the text while someone is typing would also fight their cursor and the debounce timer.
+  if self.model_refreshing:
+   # //remarks: A request is already in flight. A corrected URL is queued and run as soon as it finishes;
+   # //remarks: a manual click just reports the state so two worker threads never share one dropdown update.
+   if manual: self.status.setText('A model list refresh is already running.')
+   elif url != self.model_url: self.model_pending=url
+   return
+  if not manual and url == self.refreshed: return
+  if not key:
+   if manual: QMessageBox.warning(self,'API key required','Enter the API key first: model discovery sends it to the provider.')
+   return
+  # //remarks: self.refreshed is only updated by a *successful* fetch (see poll_models), so a failed attempt -
+  # //remarks: for example before the key was pasted - does not block the automatic retry that the next edit
+  # //remarks: schedules for the same URL.
+  self.model_refreshing=True; self.model_manual=manual; self.model_pending=''
+  # //remarks: Only the explicit Save & Connect press proves the key; an automatic or Refresh-button fetch reuses the
+  # //remarks: verification that already exists, so a background refresh never spends a completion or fails a working
+  # //remarks: connection just because the provider is briefly busy.
+  self.model_verify=verify_key; self.model_key=key; self.model_check=verify_key
+  self.model_request=(self.url.text().strip(),self.key.text().strip())
+  if manual: self.refresh_button.setEnabled(False); self.status.setText(f'Fetching model list from {url}/models ...')
+  loader=ModelListLoader(url,key); loader.start()
+  # //remarks: Poll from the event loop instead of joining the thread here, so the window stays fully responsive
+  # //remarks: and no other action can be re-entered while the request is in flight.
+  self.model_loader=loader; self.model_url=url; self.model_deadline=time.monotonic()+30
+  self.model_poll.start()
+ def poll_models(self):
+  # //remarks: Collect the worker result once it finishes or the wall-clock budget runs out. A provider that
+  # //remarks: accepts the connection but never answers therefore ends in a timeout note, never in a hang.
+  loader=self.model_loader
+  if loader is None: self.model_poll.stop(); return
+  if loader.is_alive() and time.monotonic()<self.model_deadline: return
+  self.model_poll.stop(); self.model_loader=None
+  self.model_refreshing=False
+  manual=self.model_manual; url=self.model_url
+  pending=self.model_pending; self.model_pending=''
+  if self.model_request!=(self.url.text().strip(),self.key.text().strip()):
+   self.on_connection_edited()
+   return
+  if manual: self.refresh_button.setEnabled(True)
+  if loader.is_alive():
+   if manual: self.status.setText(f'Model list request timed out after 30 seconds ({url}). The current list is kept.')
+   self.connect_status.setText('Connection timed out - check the Base URL and press Save & Connect again.')
+   self.connect_status.setStyleSheet('color:#c62828;padding:2px 2px;')
+   self.connect_button.setEnabled(True); self.model.setEnabled(False); self.refresh_button.setEnabled(False)
+  elif loader.list_error:
+   # //remarks: Only claim the list is kept when there actually is one: after moving to a new provider the list has
+   # //remarks: already been cleared, so the old wording promised something that was no longer on screen.
+   kept=' The current list is kept.' if self.model_cache else ' No model list is loaded for this provider yet.'
+   if manual: self.status.setText(f'Model list could not be fetched ({loader.list_error}).{kept}')
+   # //remarks: A rejected key or a wrong path leaves the connection unconfirmed and names the reason in the
+   # //remarks: connect line, so the user fixes the field and presses Save & Connect again.
+   self.connect_status.setText(f'Connection failed - {loader.list_error}')
+   self.connect_status.setStyleSheet('color:#c62828;padding:2px 2px;')
+   self.connect_button.setEnabled(True); self.model.setEnabled(False); self.refresh_button.setEnabled(False)
+  else:
+   # //remarks: A completed request marks the URL as checked whatever the answer contained, so the debounce
+   # //remarks: timer does not repeat it. A timed-out or failed request is deliberately NOT marked, so the next
+   # //remarks: edit (for example pasting the API key) retries the same URL automatically.
+   self.refreshed=url
+   if loader.list_id:
+    # //remarks: A list that arrives for a provider other than the one already in the dropdown must replace the
+    # //remarks: selection too: keeping models[0] of the old provider would leave the previous provider's model
+    # //remarks: selected while the new provider's list is shown. The first entry is the honest default.
+    replacing=list(loader.list_id)!=list(self.model_cache)
+    self.model_cache=list(loader.list_id)
+    self.fetched=(profile_key(self.connected_url or url),self.model_key)
+    if replacing:
+     # //remarks: A different list resets the picker to its first entry rather than keeping a stale selection.
+     self.model.blockSignals(True); self.set_models(self.model_cache,keep_current=False)
+     self.model.setCurrentIndex(0 if self.model.count() else -1)
+     self.model.blockSignals(False)
+    else: self.set_models(self.model_cache)
+    # //remarks: Report the URL that actually answered, because discovery may have used the site-root form when
+    # //remarks: the OpenAI-style <base>/models path returned nothing.
+    source=loader.list_url or url
+    # //remarks: A day count for the provider's certificate is taken here, once, so the tooltip can show it: this is
+    # //remarks: how a future genuine expiry becomes visible before it blocks a translation run.
+    days=tls_certificate_expiry(url)
+    self.cert_days=days
+    expiry=f' Certificate valid for {days} more day(s).' if isinstance(days,int) and days>=0 else ''
+    # //remarks: The key check runs inside this same step, so Save & Connect is one action that both loads the list
+    # //remarks: and proves the key. It is skipped for a background or Refresh-button fetch, which keeps whatever
+    # //remarks: verification already exists: a refresh must never spend a request or revoke a working connection.
+    if self.model_check and self.model_key:
+     ok,detail,probe=self.verify_api_key(url,self.model_key,self.model_cache)
+    else:
+     ok,detail,probe=True,'',self.probe_model()
+    if ok:
+     if self.model_check: self.api_verified=profile_key(url); self.last_model=probe; self.set_api_status(True,detail)
+     message=f'{len(self.model_cache)} model(s) fetched from {source}.'+(f' {detail}.{expiry}' if self.model_check else expiry)
+     if manual: QMessageBox.information(self,'Provider connected' if self.model_check else 'Model list updated',message)
+     self.status.setText(message)
+    else:
+     self.api_verified=''
+     self.set_api_status(False,detail)
+     self.status.setText(f'{len(self.model_cache)} model(s) fetched from {source}, but the API key was rejected: {detail}')
+     if manual: QMessageBox.warning(self,'API key not verified',f'The model list was fetched from {source}, but testing the API key failed:\n\n{detail}\n\nCheck the key and press Save & Connect again.')
+    self.save()
+   elif manual:
+    # //remarks: An empty but valid answer means the provider genuinely published no models; the current
+    # //remarks: dropdown is left untouched and the tester can still type an ID by hand.
+    self.status.setText(f'The provider at {loader.list_url or url} returned no model list. The current list is kept; typing a model ID still works.')
+    QMessageBox.information(self,'No models reported',f'{loader.list_url or url} answered successfully but returned no models. The current list is kept and you can still type a model ID by hand.')
+   # //remarks: The URL answered, so the provider is remembered even before its key is proved: the user can come back
+   # //remarks: to it from the picker without retyping the address. It only earns the tick after a key check.
+   if not (loader.list_id or self.model_cache):
+    self.connect_status.setText('Provider answered but reported no models - press Test API to verify the API key.')
+  # //remarks: Finally render the gate: a confirmed, answering provider whose key is proved unlocks the Model
+  # //remarks: dropdown, anything else keeps it locked so no model can be chosen against a provider that never
+  # //remarks: responded. A fetch with no models to probe still needs one Test API press, which is exactly what the
+  # //remarks: connect line then says.
+  if not self.model_refreshing: self.apply_connection_state()
+  # //remarks: A Base URL corrected while the request was still in flight is fetched now, so the dropdown can
+  # //remarks: never stay on the previous provider's models after an obvious mistake was fixed.
+  if pending: self.refresh_models(manual=False,url=pending)
+ def verify_api_key(self,url,key,models=None,timeout=10):
+  # //remarks: Prove the key through the real chat endpoint. Some hosts serve /models to anyone, so a model list
+  # //remarks: cannot double as a key check; one minimal completion can, and it is also what the user's own
+  # //remarks: translations will do. Returns (ok, message, model) and never raises: Save & Connect must keep going
+  # //remarks: with a clear reason instead of dying on a provider error.
+  model=self.probe_model(models if models is not None else self.model_cache)
+  if not model: return False,'No model is available to test the API key with; press Test API and choose a model.',''
+  payload=json.dumps({'model':model,'messages':[{'role':'user','content':'Reply with OK.'}],'max_tokens':8}).encode('utf-8')
+  req=urllib.request.Request(url.rstrip('/')+'/chat/completions',data=payload,method='POST',headers={'Authorization':f'Bearer {key}','Content-Type':'application/json'})
+  try:
+   with urllib.request.urlopen(req,timeout=timeout) as resp: body=json.loads(resp.read().decode('utf-8','replace'))
+   reply=''
+   if isinstance(body,dict):
+    choices=body.get('choices')
+    if isinstance(choices,list) and choices and isinstance(choices[0],dict):
+     reply=str((choices[0].get('message') or {}).get('content') or '').strip()
+   return True,f'API key verified with {model}'+(f' (reply: {reply[:40]})' if reply else ''),model
+  except urllib.error.HTTPError as e:
+   try: body=e.read(600).decode('utf-8','replace')
+   except Exception: body=''
+   detail=body
+   try:
+    error=json.loads(body).get('error')
+    if isinstance(error,dict): detail=error.get('message') or error.get('code') or body
+    elif error: detail=str(error)
+   except ValueError: pass
+   return False,f'HTTP {e.code} from {req.full_url}: {(detail or "no details").strip()[:300]}',model
+  except ssl.SSLError as e: return False,describe_ssl_error(e),model
+  except urllib.error.URLError as e:
+   if isinstance(e.reason,ssl.SSLError): return False,describe_ssl_error(e.reason),model
+   return False,f'{e.reason if e.reason else e} ({req.full_url})',model
+  except OSError as e: return False,f'{e} ({req.full_url})',model
+  except ValueError as e: return False,f'invalid JSON from {req.full_url}: {e}',model
  def set_api_status(self,ok,detail=''):
   # //remarks: Single source of truth for the API pill: None=untested, True=verified, False=failed.
   # //remarks: Symbols are built with chr() so the source stays ASCII and cannot be corrupted by
@@ -387,8 +1264,18 @@ class Window(QMainWindow):
   self.add_button.setEnabled(self.recognized)
   self.delete_button.setEnabled(bool(self.rows))
  def ranked(self,selected):
-  all_free=[m for m in FREE_MODELS if m != selected]
-  return ([selected] if selected else [])+all_free+[m for m in MODELS if m not in FREE_MODELS and m != selected]
+  # //remarks: The retry order is built from whatever list is currently in the dropdown, so a tester's own
+  # //remarks: provider models (discovery result or typed IDs) take part in the fallback chain. There is no
+  # //remarks: seeded ID list any more: free models are recognised by the same "free" text search the tick box
+  # //remarks: uses, and they lead the chain whenever they are present. The selected model is always tried
+  # //remarks: first, then the remaining free models, then everything else the provider reported.
+  live=[]
+  for i in range(self.model.count()):
+   value=self.model.itemText(i).strip()
+   if value and value not in live: live.append(value)
+  leading=[m for m in live if is_free_model(m)]
+  rest=[m for m in live if m not in leading]
+  return ([selected] if selected else [])+[m for m in leading if m != selected]+[m for m in rest if m != selected]
 
  def dialog_dir(self):
   # //remarks: The remembered folder is the folder of the last imported file. When that folder still exists it
@@ -407,7 +1294,7 @@ class Window(QMainWindow):
  def images(self):
   # //remarks: Pass the remembered folder as the dialog's starting directory and remember the folder of the
   # //remarks: selection immediately, so the next import reopens where the user left off.
-  selected,_=QFileDialog.getOpenFileNames(self,'Select manga images or archives',self.dialog_dir(),'Manga files (*.jpg *.jpeg *.png *.webp *.zip *.rar)')
+  selected,_=QFileDialog.getOpenFileNames(self,'Select manga images or archives',self.dialog_dir(),'Manga files (*.jpg *.jpeg *.png *.webp *.psd *.zip *.rar)')
   if not selected:return
   # //remarks: Remember the folder of the last imported file, not the first one. A selection can span several
   # //remarks: folders (for example a chapter and its archive in another directory) and the last file is the
@@ -435,14 +1322,14 @@ class Window(QMainWindow):
    self.status.setText(f'Imported {len(self.paths)} image(s) in file-name order ({span}). Click Translate all to OCR and translate.{note}')
   else:
    self.set_image_status(False,'No supported images were found in the selected files or archives.')
-   self.status.setText(f'Import produced no usable images. Choose JPG, JPEG, PNG, WebP, ZIP, or RAR files.{note}')
+   self.status.setText(f'Import produced no usable images. Choose JPG, JPEG, PNG, WebP, PSD, ZIP, or RAR files.{note}')
  def expand_inputs(self,items):
   # //remarks: Order is taken from the file names, not from the order the file dialog happened to
   # //remarks: return the selection, so the same set of images always becomes page 1..N in name order.
   out=[]; root=Path(tempfile.mkdtemp(prefix='bluetl_'))
   for item in sorted(items,key=lambda x:_name_key(Path(x).name)):
    p=Path(item); suffix=p.suffix.lower()
-   if suffix in ('.jpg','.jpeg','.png','.webp'): out.append(str(p)); continue
+   if suffix in ('.jpg','.jpeg','.png','.webp','.psd'): out.append(str(p)); continue
    dest=root/p.stem; dest.mkdir(parents=True,exist_ok=True)
    try:
     if suffix=='.zip':
@@ -456,7 +1343,7 @@ class Window(QMainWindow):
     else: continue
     # //remarks: Same natural name order inside an archive, applied to the relative path so images
     # //remarks: stay grouped by their folder (for example one folder per chapter).
-    out.extend(str(x) for x in sorted(dest.rglob('*'),key=_name_key) if x.is_file() and x.suffix.lower() in ('.jpg','.jpeg','.png','.webp'))
+    out.extend(str(x) for x in sorted(dest.rglob('*'),key=_name_key) if x.is_file() and x.suffix.lower() in ('.jpg','.jpeg','.png','.webp','.psd'))
    except Exception as e:
     QMessageBox.warning(self,'Archive import failed',f'{p.name}: {e}')
   return out
@@ -498,17 +1385,23 @@ class Window(QMainWindow):
    # //remarks: Pages where the detector found no text are collected, so a page that produced no rows
    # //remarks: is reported in the status line instead of looking like a silent success.
    empty_pages=[]
-   for page,path in enumerate(self.paths,1):
+   for index,path in enumerate(self.paths,1):
+    # //remarks: The page number follows the file name, so "007.jpg" is reported as page 7 instead of
+    # //remarks: the position the file happens to have in the batch. A name without any digits falls
+    # //remarks: back to the batch position, so every row still gets a usable page number.
+    page=_page_number(Path(path).name,index)
     # //remarks: Detect every text block on the page with comic-text-detector and recognise each one,
     # //remarks: instead of the old single whole-page call that returned only one line per image.
     try:
-     img=Image.open(path); img.load()
+     # //remarks: open_page_image flattens a .psd into a page raster before detection; every other format opens
+     # //remarks: directly. PSD pages therefore take the exact same detector/OCR path as a JPEG or PNG.
+     img=open_page_image(path)
      crops=_text_crops(img)
      if not crops: empty_pages.append(Path(path).name)
-     self.set_progress(page-1,len(self.paths),f'OCR page {page}/{len(self.paths)}: {Path(path).name} ({len(crops)} region(s))')
+     self.set_progress(index-1,len(self.paths),f'OCR file {index}/{len(self.paths)}: {Path(path).name} (page {page}, {len(crops)} region(s))')
      panel=0
-     for index,(box,crop) in enumerate(crops,1):
-      self.set_progress(page-1,len(self.paths),f'OCR page {page}/{len(self.paths)}, region {index}/{len(crops)}')
+     for region,(box,crop) in enumerate(crops,1):
+      self.set_progress(index-1,len(self.paths),f'OCR file {index}/{len(self.paths)}, region {region}/{len(crops)}')
       # //remarks: Skip textless crops so the model cannot answer them with invented dialogue.
       if _is_blank(crop): continue
       text=engine(crop).strip()
@@ -517,7 +1410,7 @@ class Window(QMainWindow):
        # //remarks: Keep the crop beside the text and flag a suspicious result instead of trusting it. A
        # //remarks: flagged row is visible in the Review column and is held back from translation until the
        # //remarks: user approves it by clearing that cell.
-       crop_path=str(Path(self.review_dir)/f'p{page:03d}_n{panel:03d}.png')
+       crop_path=str(Path(self.review_dir)/f'p{page:03d}_f{index:03d}_n{panel:03d}.png')
        try: crop.save(crop_path)
        except (OSError,ValueError): crop_path=''
        reason=_suspicion(crop,text)
@@ -558,7 +1451,7 @@ class Window(QMainWindow):
   # //remarks: Insert below the selected line so manual text keeps the surrounding page/panel order.
   selected=self.table.currentRow()
   if selected<0 or selected>=len(self.rows):
-   QMessageBox.information(self,'Select a line','Select a recognized line first, then click Add OCR row.')
+   QMessageBox.information(self,'Select a line','Select a recognised line first, then click Add OCR row.')
    return
   source=self.rows[selected]
   row=Row(source.page,source.panel+1,'')
@@ -593,7 +1486,7 @@ class Window(QMainWindow):
    return
   crop=self.rows[selected].crop
   if not crop or not Path(crop).is_file():
-   QMessageBox.information(self,'No source crop','This row has no saved source crop. Rows typed by hand have none, and crops are recreated by the next Recognize OCR run.')
+   QMessageBox.information(self,'No source crop','This row has no saved source crop. Rows typed by hand have none, and crops are recreated by the next Recognise OCR run.')
    return
   # //remarks: os.startfile hands the image to the user's normal Windows image viewer.
   try: os.startfile(crop)
@@ -604,7 +1497,7 @@ class Window(QMainWindow):
   # //remarks: evaluation set, which is what a future detector or model change must be judged against.
   self.sync()
   if not self.rows:
-   QMessageBox.information(self,'Nothing to export','Import images and click Recognize OCR first.'); return
+   QMessageBox.information(self,'Nothing to export','Import images and click Recognise OCR first.'); return
   folder=QFileDialog.getExistingDirectory(self,'Export OCR review dataset',self.dialog_dir())
   if not folder:return
   out=Path(folder); crops=out/'crops'; crops.mkdir(parents=True,exist_ok=True)
@@ -616,7 +1509,7 @@ class Window(QMainWindow):
     try:
      shutil.copy2(r.crop,crops/name); copied+=1
     except OSError: name=''
-   records.append(json.dumps({'page':r.page,'panel':r.panel,'crop':f'crops/{name}' if name else '','recognized':r.jp,'translation':r.tr,'review':r.review,'reason':r.reason},ensure_ascii=False))
+   records.append(json.dumps({'page':r.page,'panel':r.panel,'crop':f'crops/{name}' if name else '','recognised':r.jp,'translation':r.tr,'review':r.review,'reason':r.reason},ensure_ascii=False))
   (out/'ocr_review.jsonl').write_text('\n'.join(records)+'\n',encoding='utf-8')
   self.status.setText(f'OCR review set written to {out}: {len(records)} row(s) and {copied} crop image(s).')
  def refresh(self):
@@ -676,11 +1569,21 @@ class Window(QMainWindow):
   if label: self.status.setText(label)
   QApplication.processEvents()
  def client(self):
+  # //remarks: Enforce the same confirmation gate the UI shows. A request must never be sent from an unconfirmed
+  # //remarks: draft, otherwise a half-typed Base URL would reach the network behind the user's back.
+  if not self.same_connection(self.url.text().strip(),self.key.text().strip()):
+   QMessageBox.warning(self,'Connection not confirmed','Enter the Base URL and API key, then press Save & Connect to load the model list.')
+   return None
+  # //remarks: A confirmed connection is not enough: the key must also have been proved, because a provider whose
+  # //remarks: /models endpoint is public would otherwise let an invalid key look ready and fail on the first row.
+  if profile_key(self.url.text().strip())!=self.api_verified:
+   QMessageBox.warning(self,'API key not verified','The model list is loaded, but the API key has not been verified yet. Press Test API to check it, or press Save & Connect again.')
+   return None
   if not self.url.text() or not self.key.text() or not self.model.currentText(): QMessageBox.warning(self,'API settings required','Enter Base URL, API key, and model name.'); return None
   self.save(); return OpenAI(base_url=self.url.text().rstrip('/'),api_key=self.key.text())
  def translate(self,text,client):
   prof={'English':'natural conversational English','Bahasa Melayu':'natural Malaysian Malay, not Indonesian or textbook Malay','Simplified Chinese':'natural Mainland Chinese Simplified Chinese','Traditional Chinese':'natural Taiwanese Traditional Chinese'}[self.lang.currentText()]
-  prompt=f'Translate this Japanese manga text into {prof}. Preserve tone, emotion, politeness, slang, humor, and implied meaning. Return only the translation, with no notes or explanation.\\n\\nJapanese:\\n{text}'
+  prompt=f'Translate this Japanese manga text into {prof}. Preserve tone, emotion, politeness, slang, humour, and implied meaning. Return only the translation, with no notes or explanation.\\n\\nJapanese:\\n{text}'
   selected=self.model.currentText(); candidates=self.candidates(); last=None; self.last_model=''
   for model in candidates:
    try:
@@ -692,22 +1595,39 @@ class Window(QMainWindow):
    except Exception as e: last=e
   raise RuntimeError(f'All configured models failed. Last error: {last}')
  def test_api(self):
-  c=self.client()
-  if not c:return
+  url=self.url.text().strip(); key=self.key.text().strip()
+  # //remarks: Validation happens before any client is built: the key check is the very action that unlocks the Model
+  # //remarks: dropdown, so it must be reachable on a freshly fetched list that has not been proved yet.
+  if not url or not key:
+   QMessageBox.warning(self,'Connection details required','Enter the Base URL and API key, then press Save & Connect.'); return
+  if not self.same_connection(url,key):
+   QMessageBox.warning(self,'Connection not confirmed','Press Save & Connect first: the model list must be loaded before the API key can be tested.'); return
+  c=OpenAI(base_url=url.rstrip('/'),api_key=key)
   last=None
   for model in self.candidates():
    try:
     # //remarks: Busy bar for the probe request; a slow provider previously looked like a dead button.
     self.begin_busy(f'Testing API model: {model}...')
-    r=c.chat.completions.create(model=model,messages=[{'role':'user','content':'Reply with OK.'}]); reply=(r.choices[0].message.content or '').strip()
+    r=c.chat.completions.create(model=model,messages=[{'role':'user','content':'Reply with exactly one word: OK.'}],max_tokens=8); reply=(r.choices[0].message.content or '').strip()
+    if re.fullmatch(r'(?:\s*OK[\s,.!;:]*)+',reply,re.IGNORECASE): reply='OK'
     self.end_progress('API test succeeded.')
-    # //remarks: A successful probe flips the API pill to a green tick and records which model answered.
+    # //remarks: A successful probe flips the API pill to a green tick, records which model answered, and remembers
+    # //remarks: this provider as one whose key works - that is what lets the user come back to it later and what
+    # //remarks: unlocks the Model dropdown after Save & Connect.
     self.set_api_status(True,f'Verified with model: {model}')
+    self.last_model=model
+    self.api_verified=profile_key(url)
+    self.save()
+    self.apply_connection_state()
     QMessageBox.information(self,'API connection',f'Connection succeeded.\nModel: {model}\nResponse: {reply}')
     return
    except Exception as e: last=e
   self.end_progress('API test failed.')
-  # //remarks: Every candidate failed, so the pill shows a red cross with the last real provider error.
+  # //remarks: Every candidate failed, so the pill shows a red cross with the last real provider error, and the
+  # //remarks: provider loses its verified state: the key that is on screen demonstrably does not work.
+  self.api_verified=''
+  self.save()
+  self.apply_connection_state()
   self.set_api_status(False,str(last))
   QMessageBox.critical(self,'API connection failed',f'All configured models failed.\n\nLast error: {last}')
  def one(self):
@@ -726,14 +1646,14 @@ class Window(QMainWindow):
     QMessageBox.critical(self,'Translation failed',str(e))
  def all(self):
   # //remarks: Translate all stays a single click: when nothing has been recognised for the imported batch
-  # //remarks: yet, local OCR runs first. Recognizing manually beforehand is therefore optional, and the
+  # //remarks: yet, local OCR runs first. Recognising manually beforehand is therefore optional, and the
   # //remarks: reviewed or edited rows are reused here without repeating OCR: useful when recognition needs
   # //remarks: fixing, or when the user wants to approve the lines before spending translation tokens.
   if self.paths and not self.rows:
    self.ocr()
   self.sync()
   if not self.rows:
-   QMessageBox.information(self,'No OCR text','Import images first, or click Recognize OCR to load the recognized lines.'); return
+   QMessageBox.information(self,'No OCR text','Import images first, or click Recognise OCR to load the recognised lines.'); return
   c=self.client()
   if not c:return
   # //remarks: Do not send rows that already have a translation. Clear a Translation cell to request
@@ -764,6 +1684,10 @@ class Window(QMainWindow):
    # //remarks: If the API was never tested, a successful batch translation is itself proof
    # //remarks: the API works, so tick the pill automatically instead of leaving it as "not tested".
    self.set_api_status(True,f'Verified automatically by Translate all (model: {self.last_model or self.model.currentText()})')
+   # //remarks: A successful batch proves the key as well as the provider, so the connection is remembered as verified
+   # //remarks: and comes back unlocked on the next launch instead of asking for another Test API press.
+   self.api_verified=profile_key(self.url.text().strip())
+   self.apply_connection_state()
    self.save()
   except Exception as e:
    # //remarks: Hide the bar on failure too, otherwise a stalled bar looks like a hang.
@@ -773,12 +1697,12 @@ class Window(QMainWindow):
    QMessageBox.critical(self,'Translation failed',str(e))
  def txt(self):
   self.sync(); p,_=QFileDialog.getSaveFileName(self,'Export TXT','translation.txt','Text (*.txt)')
-  if p: Path(p).write_text('Page\tPanel\tRecognized text\tTranslation\n'+'\n'.join(f'{r.page}\t{r.panel}\t{r.jp}\t{r.tr}' for r in self.rows),encoding='utf-8')
+  if p: Path(p).write_text('Page\tPanel\tRecognised text\tTranslation\n'+'\n'.join(f'{r.page}\t{r.panel}\t{r.jp}\t{r.tr}' for r in self.rows),encoding='utf-8')
  def docx(self):
   self.sync(); p,_=QFileDialog.getSaveFileName(self,'Export DOCX','translation.docx','Word (*.docx)')
   if p:
    d=Document(); t=d.add_table(rows=1,cols=4)
-   for c,x in zip(t.rows[0].cells,['Page','Panel','Recognized text','Translation']): c.text=x
+   for c,x in zip(t.rows[0].cells,['Page','Panel','Recognised text','Translation']): c.text=x
    for r in self.rows:
     cells=t.add_row().cells
     for c,x in zip(cells,[r.page,r.panel,r.jp,r.tr]): c.text=str(x)
