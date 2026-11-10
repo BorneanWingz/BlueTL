@@ -1,7 +1,7 @@
 ﻿$ErrorActionPreference = 'Stop'
 py -3.14 -m pip install --upgrade pip
 py -3.14 -m pip install -r requirements.txt
-$icon = Join-Path $PSScriptRoot 'assets\bluetl.ico'
+$icon = Join-Path $PSScriptRoot 'assets\bluetl.png'
 if (!(Test-Path $icon)) { throw "Missing icon: $icon" }
 $ocrModel = Join-Path $PSScriptRoot 'assets\manga-ocr-model'
 if (!(Test-Path (Join-Path $ocrModel 'vocab.txt'))) { throw "Missing Manga OCR model: $ocrModel" }

@@ -34,9 +34,9 @@ def unprotect(value):
 from dataclasses import dataclass
 from openai import OpenAI
 from docx import Document
-from PySide6.QtWidgets import QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QLineEdit,QComboBox,QPushButton,QFileDialog,QTableWidget,QTableWidgetItem,QMessageBox,QLabel,QHeaderView,QTabWidget,QProgressBar,QSizePolicy,QStyle,QStyleOptionButton,QCheckBox
-from PySide6.QtCore import Qt,QSize,QTimer
-from PySide6.QtGui import QIcon,QPainter,QPalette
+from PySide6.QtWidgets import QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QFrame,QLineEdit,QComboBox,QPushButton,QFileDialog,QTableWidget,QTableWidgetItem,QMessageBox,QLabel,QHeaderView,QTabWidget,QProgressBar,QCheckBox
+from PySide6.QtCore import Qt,QTimer
+from PySide6.QtGui import QIcon
 
 CFG=Path(os.getenv('APPDATA',Path.home()))/'BlueTL'/'config.json'
 LANGS=['English','Bahasa Melayu','Simplified Chinese','Traditional Chinese']
@@ -308,29 +308,6 @@ class ModelListLoader(threading.Thread):
   self.list_error=str(transport[0]) if transport else (str(first) if first is not None else 'model list request failed')
   if last and self.list_error and not transport and last not in self.list_error: self.list_error=f'{self.list_error} (also tried {last})'
 
-# //remarks: A compact push button that wraps its label onto a second line instead of eliding it with
-# //remarks: "...". This keeps every action readable while the whole action row still fits one line.
-class WrapButton(QPushButton):
- def __init__(self,text='',parent=None):
-  super().__init__(text,parent)
-  self.setSizePolicy(QSizePolicy.Fixed,QSizePolicy.Fixed)
-  self.setMinimumWidth(62); self.setMaximumWidth(105)
- def sizeHint(self):
-  return QSize(105,40)
- def minimumSizeHint(self):
-  return QSize(62,40)
- def paintEvent(self,event):
-  # //remarks: Draw the normal button frame, then the label on top of it with word wrap so a long
-  # //remarks: label reflows inside the fixed width instead of being clipped.
-  opt=QStyleOptionButton(); self.initStyleOption(opt); opt.text=''
-  painter=QPainter(self); painter.setRenderHint(QPainter.TextAntialiasing)
-  self.style().drawControl(QStyle.CE_PushButton,opt,painter,self)
-  group=QPalette.Active if self.isEnabled() else QPalette.Disabled
-  painter.setPen(self.palette().color(group,QPalette.ButtonText))
-  rect=self.rect().adjusted(5,3,-5,-3)
-  painter.drawText(rect,Qt.TextWordWrap|Qt.AlignCenter|Qt.AlignVCenter,self.text())
-  painter.end()
-
 # //remarks: Bundled asset resolution. Assets sit next to the source checkout when running from source and
 # //remarks: under _MEIPASS inside the PyInstaller bundle, so one helper keeps both layouts correct.
 def asset_path(*parts):
@@ -566,7 +543,7 @@ def _name_key(value):
 
 class Window(QMainWindow):
  def __init__(self):
-   super().__init__(); self.setWindowTitle('BlueTL - Manga Translator'); self.resize(1050,650); self.rows=[]; self.paths=[]
+   super().__init__(); self.setWindowTitle('BlueTL - Manga Translator'); self.resize(1152,760); self.setMinimumSize(820,620); self.rows=[]; self.paths=[]
    # //remarks: Tracks whether the OCR step has run for the current batch. Manual row insertion waits for
    # //remarks: that step, because a new row takes its page and panel number from the recognised rows.
    self.recognized=False
@@ -621,124 +598,208 @@ class Window(QMainWindow):
    # //remarks: Set while load() fills the fields from the settings file, so the provider-restore handler does not
    # //remarks: undo the restored selection or fight the startup refresh.
    self.restoring=False
-   icon_path=asset_path('bluetl.ico')
+   icon_path=asset_path('bluetl.png')
    if icon_path.is_file(): self.setWindowIcon(QIcon(str(icon_path)))
    self.ui(); self.load()
  def ui(self):
-  w=QWidget(); v=QVBoxLayout(w); f=QFormLayout()
-  # //remarks: Placeholder only - no provider URL or key is compiled into the executable, so the field starts
-  # //remarks: empty and the user's own provider is remembered in the settings file instead.
-  self.url=QLineEdit(); self.url.setPlaceholderText('https://your-provider.example/v1')
-  self.key=QLineEdit(); self.key.setEchoMode(QLineEdit.Password); self.key.setPlaceholderText('API key')
-  self.model=QComboBox(); self.model.setEditable(True); self.model.setToolTip('Selects the model tried first; remaining models in the list are automatic fallbacks. The list is fetched from your Base URL after you press Save & Connect.')
-  # //remarks: Free models only sits directly under the model picker, as requested. Ticking it narrows the
-  # //remarks: dropdown to the fetched model IDs that contain the text "free"; unticking restores the full
-  # //remarks: provider list. The filter is applied to the cached list, so toggling it costs no network call.
-  self.free_only=QCheckBox('Free models only'); self.free_only.setToolTip('Show only the models whose ID contains the text "free" (searched in the list fetched from your Base URL).')
-  self.free_only.toggled.connect(self.on_free_only_toggled)
-  self.lang=QComboBox(); self.lang.addItems(LANGS)
-  # //remarks: The saved-provider picker makes the remembered providers reachable: choosing an entry fills in that
-  # //remarks: provider's Base URL, its DPAPI-protected key, and its cached model list, so switching between several
-  # //remarks: providers needs no retyping. Only providers whose key was proved are listed.
+  w=QWidget(); shell=QVBoxLayout(w); shell.setContentsMargins(18,12,18,8); shell.setSpacing(10)
+  brand=QHBoxLayout(); brand.setSpacing(10)
+  title=QLabel('BlueTL'); title.setObjectName('brandTitle')
+  subtitle=QLabel('Manga Translator'); subtitle.setObjectName('brandSubtitle')
+  brand.addWidget(title); brand.addWidget(subtitle); brand.addStretch()
+  self.header_connection=QLabel('● Not connected'); self.header_connection.setObjectName('connectionBadge')
+  brand.addWidget(self.header_connection); shell.addLayout(brand)
+  tabs=QTabWidget()
+  page=QWidget(); v=QVBoxLayout(page); v.setContentsMargins(8,10,8,8); v.setSpacing(12)
+  self.connection_summary=QFrame(); self.connection_summary.setObjectName('connectionSummary')
+  summary=QHBoxLayout(self.connection_summary); summary.setContentsMargins(12,8,10,8); summary.setSpacing(8)
+  self.connection_summary_text=QLabel('Connection required. Enter your provider details below.')
+  self.connection_summary_text.setTextFormat(Qt.PlainText)
+  summary.addWidget(self.connection_summary_text,1)
+  self.change_connection_button=QPushButton('Change')
+  self.change_connection_button.clicked.connect(lambda: self.set_connection_editor_visible(True))
+  summary.addWidget(self.change_connection_button)
+  self.connection_summary.hide(); v.addWidget(self.connection_summary)
+
+  self.connection_card=QFrame(); self.connection_card.setObjectName('connectionCard')
+  connection=QVBoxLayout(self.connection_card); connection.setContentsMargins(18,14,18,14); connection.setSpacing(10)
+  connection_heading=QHBoxLayout()
+  connection_title=QLabel('Connection'); connection_title.setObjectName('cardTitle')
+  connection_heading.addWidget(connection_title); connection_heading.addStretch()
+  self.hide_connection_button=QPushButton('Hide')
+  self.hide_connection_button.clicked.connect(lambda: self.set_connection_editor_visible(False))
+  connection_heading.addWidget(self.hide_connection_button); connection.addLayout(connection_heading)
+
+  provider_row=QHBoxLayout(); provider_row.setSpacing(8)
+  provider_label=QLabel('Saved providers'); provider_label.setObjectName('fieldLabel')
   self.provider=QComboBox(); self.provider.setToolTip('Saved providers. Choosing one fills in its Base URL and API key, then re-fetches its model list.')
   self.provider.activated.connect(self.on_provider_chosen)
-  # //remarks: Cline-style layout. The connection fields are one group that the user fills in and then confirms
-  # //remarks: with Save & Connect, exactly like Cline's provider panel: enter the Base URL and API key, press Save
-  # //remarks: & Connect, and only then is the provider contacted. Nothing is sent while the user is still typing.
-  self.delete_provider_button=QPushButton('Delete'); self.delete_provider_button.setToolTip('Remove the saved provider that matches the Base URL on screen, together with its stored API key and model list.')
+  self.delete_provider_button=QPushButton('Delete')
+  self.delete_provider_button.setToolTip('Remove the saved provider that matches the Base URL on screen, together with its stored API key and model list.')
   self.delete_provider_button.clicked.connect(self.delete_provider)
-  provider_row=QWidget(); pr=QHBoxLayout(provider_row); pr.setContentsMargins(0,0,0,0); pr.addWidget(self.provider,1); pr.addWidget(self.delete_provider_button)
-  for label,x in [('Saved providers',provider_row),('OpenAI-compatible Base URL',self.url),('API key',self.key)]: f.addRow(label,x)
+  provider_group=QVBoxLayout(); provider_group.setSpacing(4); provider_group.addWidget(provider_label)
+  provider_controls=QHBoxLayout(); provider_controls.setSpacing(8); provider_controls.addWidget(self.provider,1); provider_controls.addWidget(self.delete_provider_button); provider_group.addLayout(provider_controls)
+  provider_row.addLayout(provider_group,1); connection.addLayout(provider_row)
+
+  self.url=QLineEdit(); self.url.setPlaceholderText('https://your-provider.example/v1')
+  self.key=QLineEdit(); self.key.setEchoMode(QLineEdit.Password); self.key.setPlaceholderText('API key')
+  fields=QGridLayout(); fields.setHorizontalSpacing(18); fields.setVerticalSpacing(6)
+  url_label=QLabel('OpenAI-compatible Base URL'); url_label.setObjectName('fieldLabel')
+  key_label=QLabel('API key'); key_label.setObjectName('fieldLabel')
+  fields.addWidget(url_label,0,0); fields.addWidget(key_label,0,1)
+  fields.addWidget(self.url,1,0); fields.addWidget(self.key,1,1)
+
+  self.model=QComboBox(); self.model.setEditable(True); self.model.setToolTip('Selects the model tried first; remaining models in the list are automatic fallbacks. The list is fetched from your Base URL after you press Save & Connect.')
+  self.model.setEnabled(False)
+  self.free_only=QCheckBox('Free models only')
+  self.free_only.setToolTip('Show only the models whose ID contains the text "free" (searched in the list fetched from your Base URL).')
+  self.free_only.toggled.connect(self.on_free_only_toggled)
+  self.refresh_button=QPushButton('Refresh models')
+  self.refresh_button.setToolTip('Re-fetch the model list from the confirmed Base URL.')
+  self.refresh_button.clicked.connect(lambda: self.refresh_models(manual=True))
+  self.refresh_button.setEnabled(False)
+  model_row_widget=QWidget()
+  model_row=QHBoxLayout(model_row_widget); model_row.setContentsMargins(0,0,0,0); model_row.setSpacing(8)
+  model_row.addWidget(self.model,1); model_row.addWidget(self.refresh_button); model_row.addWidget(self.free_only)
+  model_label=QLabel('Model'); model_label.setObjectName('fieldLabel')
+  fields.addWidget(model_label,2,0,1,2); fields.addWidget(model_row_widget,3,0,1,2)
+  self.refresh_button.hide()
+  connection.addLayout(fields)
+  self.url.textEdited.connect(lambda _: self.on_connection_edited())
+  self.key.textEdited.connect(lambda _: self.on_connection_edited())
+  self.url.textChanged.connect(lambda _: self.on_url_changed())
+
   self.connect_button=QPushButton('Save & Connect')
+  self.connect_button.setObjectName('connectAction')
   self.connect_button.setToolTip('Confirm the Base URL and API key. Pressing this fetches the full model list from the provider and, once the key is proved, enables the Model dropdown.')
   self.connect_button.clicked.connect(self.confirm_connection)
   self.connect_status=QLabel(); self.connect_status.setTextFormat(Qt.PlainText)
-  conn_row=QHBoxLayout(); conn_row.addWidget(self.connect_button); conn_row.addWidget(self.connect_status,1)
-  f.addRow('',conn_row)
-  # //remarks: Everything below this line describes the *confirmed* provider. The Model dropdown stays disabled
-  # //remarks: until Save & Connect has produced a list and the key has been proved, so a model can never be chosen
-  # //remarks: for a provider that has not answered - the same order of steps Cline uses.
-  for label,x in [('Model',self.model),('',self.free_only),('Target language',self.lang)]: f.addRow(label,x)
-  # //remarks: Refresh models sits on the same row as the Model picker (as requested), so the list and the action
-  # //remarks: that updates it read as one control group. The list is still fetched from the provider's own /models
-  # //remarks: endpoint, so testers pick their provider's models instead of any hard-coded list, and the button lets
-  # //remarks: them re-fetch on demand (after changing the key, or when a fetch timed out).
-  self.refresh_button=QPushButton('Refresh models'); self.refresh_button.setToolTip('Re-fetch the model list from the confirmed Base URL.')
-  self.refresh_button.clicked.connect(lambda: self.refresh_models(manual=True))
-  self.refresh_button.setEnabled(False)
-  # //remarks: The Model row is taken out of the form and put back inside one widget that holds the picker and the
-  # //remarks: Refresh button side by side, which keeps the label column aligned with every other row.
-  model_row=f.takeRow(4)
-  holder=QWidget(); model_line=QHBoxLayout(holder); model_line.setContentsMargins(0,0,0,0)
-  # //remarks: takeRow() returns layout *items*, not widgets, so each side is unwrapped with .widget(). Either side can
-  # //remarks: be None (a row may hold a nested row instead of a widget), which is why both are checked.
-  model_field=model_row.fieldItem.widget() if model_row.fieldItem is not None else None
-  model_line.addWidget(model_field,1) if model_field is not None else None
-  model_line.addWidget(self.refresh_button)
-  model_label_item=model_row.labelItem
-  model_label=model_label_item.widget().text() if model_label_item is not None and model_label_item.widget() is not None else 'Model'
-  f.insertRow(4,model_label,holder)
-  # //remarks: Editing either connection field does NOT fire a request any more. It only marks the saved
-  # //remarks: connection stale, which re-enables Save & Connect, locks the model list, and - when the Base URL
-  # //remarks: itself changed - clears the previous provider's selection so a stale model can never be sent to a
-  # //remarks: different host.
-  self.url.textEdited.connect(lambda _: self.on_connection_edited())
-  self.key.textEdited.connect(lambda _: self.on_connection_edited())
-  # //remarks: Also watch programmatic changes (choosing a saved provider, restoring the settings file, pasting a
-  # //remarks: URL) so the model list always belongs to the URL currently in the field, not only when a keystroke
-  # //remarks: produced the change.
-  self.url.textChanged.connect(lambda _: self.on_url_changed())
-  v.addLayout(f)
-  # //remarks: Two always-visible status pills remove the "did it work?" ambiguity:
-  # //remarks: tick = verified, cross = failed, dash = not checked yet. They start neutral
-  # //remarks: (not checked), so the user can tell "untested" apart from "failed".
-  s=QHBoxLayout(); s.addWidget(QLabel('Status:'))
+  connect_row=QHBoxLayout(); connect_row.setSpacing(12); connect_row.addWidget(self.connect_button); connect_row.addWidget(self.connect_status,1)
+  connection.addLayout(connect_row)
+  v.addWidget(self.connection_card)
+
+  self.lang=QComboBox(); self.lang.addItems(LANGS)
   self.api_status=QLabel(); self.image_status=QLabel()
-  for pill in (self.api_status,self.image_status): pill.setTextFormat(Qt.PlainText); s.addWidget(pill)
-  s.addStretch(); v.addLayout(s)
+  for pill in (self.api_status,self.image_status): pill.setTextFormat(Qt.PlainText)
   self.set_api_status(None); self.set_image_status(None)
-  # //remarks: All actions sit in one row so every action is visible at once: OCR work first, then
-  # //remarks: provider and export work.
-  # //remarks: The labels are kept short and every button gets a capped width, so the whole row fits
-  # //remarks: the window without the window having to grow. A label that is still too wide wraps onto
-  # //remarks: a second line inside its own button instead of being clipped.
-  b=QHBoxLayout()
-  for text,fn in [('Import',self.images),('Recognise OCR',self.recognize),('Add row',self.add),('Delete row',self.delete),('Translate all',self.all),('Test API',self.test_api),('Export TXT',self.txt),('Export DOCX',self.docx)]:
-   q=WrapButton(text); q.clicked.connect(fn); b.addWidget(q)
-   # //remarks: Keep the step-specific buttons addressable: recognition is its own action and manual
-   # //remarks: row insertion waits for it.
-   if text=='Recognise OCR': self.ocr_button=q
-   elif text=='Add row': self.add_button=q
-   elif text=='Delete row': self.delete_button=q
-  v.addLayout(b)
+
+  self.job_card=QFrame(); self.job_card.setObjectName('jobCard')
+  job=QVBoxLayout(self.job_card); job.setContentsMargins(18,14,18,14); job.setSpacing(10)
+  job_title=QLabel('Job'); job_title.setObjectName('cardTitle'); job.addWidget(job_title)
+  job_controls=QHBoxLayout(); job_controls.setSpacing(10)
+  language_group=QVBoxLayout(); language_group.setSpacing(4)
+  language_label=QLabel('Target language'); language_label.setObjectName('fieldLabel')
+  language_group.addWidget(language_label); language_group.addWidget(self.lang)
+  job_controls.addLayout(language_group,1)
+  self.job_refresh_button=QPushButton('Refresh models')
+  self.job_refresh_button.setToolTip(self.refresh_button.toolTip())
+  self.job_refresh_button.setEnabled(False)
+  self.job_refresh_button.clicked.connect(lambda: self.refresh_models(manual=True))
+  job_controls.addWidget(self.job_refresh_button)
+  job_controls.addWidget(self.api_status); job_controls.addWidget(self.image_status)
+  job.addLayout(job_controls)
+
+  self.ocr_button=QPushButton('Recognise OCR')
   self.ocr_button.setToolTip('Recognise every text region on the imported images with the local OCR model. This spends no API tokens.')
+  self.ocr_button.clicked.connect(self.recognize)
+  self.add_button=QPushButton('Add row')
   self.add_button.setToolTip('Insert an empty row directly below the selected line so you can type the text yourself. Enabled once OCR has run.')
+  self.add_button.clicked.connect(self.add)
+  self.delete_button=QPushButton('Delete row')
   self.delete_button.setToolTip('Remove the selected row, for example a line the recogniser invented on a textless region.')
-  # //remarks: Long OCR/translation lines used to be clipped to one line and hidden behind "...".
-  # //remarks: Word wrap on the table plus wrapping items and computed row heights lets the text
-  # //remarks: reflow onto multiple lines so nothing is cut off horizontally.
-  # //remarks: The Review column shows the suspicion check result, so an invented line is visible in the
-  # //remarks: table instead of being trusted silently.
-  self.table=QTableWidget(0,5); self.table.setHorizontalHeaderLabels(['Page','Panel','Recognised text','Translation','Review'])
-  self.table.setWordWrap(True)
-  self.table.setAlternatingRowColors(True)
-  self.table.horizontalHeader().setSectionResizeMode(2,QHeaderView.Stretch); self.table.horizontalHeader().setSectionResizeMode(3,QHeaderView.Stretch); self.table.horizontalHeader().setSectionResizeMode(4,QHeaderView.ResizeToContents)
-  # //remarks: Re-run height calculation after the user resizes columns, because the amount of
-  # //remarks: wrapping depends on the current column width.
+  self.delete_button.clicked.connect(self.delete)
+  import_button=QPushButton('Import')
+  import_button.clicked.connect(self.images)
+  translate_button=QPushButton('Translate all')
+  translate_button.setObjectName('primaryAction')
+  translate_button.setMinimumHeight(42)
+  translate_button.clicked.connect(self.all)
+  action_row=QHBoxLayout(); action_row.setSpacing(10)
+  import_button.setMinimumWidth(140); self.ocr_button.setMinimumWidth(180)
+  action_row.addWidget(import_button); action_row.addWidget(self.ocr_button); action_row.addWidget(translate_button,1)
+  job.addLayout(action_row)
+
+  self.test_api_button=QPushButton('Test API'); self.test_api_button.clicked.connect(self.test_api)
+  self.export_txt_button=QPushButton('Export TXT'); self.export_txt_button.clicked.connect(self.txt)
+  self.export_docx_button=QPushButton('Export DOCX'); self.export_docx_button.clicked.connect(self.docx)
+  utility_row=QHBoxLayout(); utility_row.addStretch()
+  for button in (self.test_api_button,self.export_txt_button,self.export_docx_button,self.add_button,self.delete_button):
+   utility_row.addWidget(button)
+  job.addLayout(utility_row); v.addWidget(self.job_card)
+
+  self.table=QTableWidget(0,5); self.table.setHorizontalHeaderLabels(['PAGE','PANEL','Recognised text','TRANSLATION','REVIEW'])
+  self.table.setWordWrap(True); self.table.setAlternatingRowColors(True)
+  self.table.setShowGrid(False); self.table.verticalHeader().setVisible(False)
+  self.table.horizontalHeader().setSectionResizeMode(0,QHeaderView.ResizeToContents)
+  self.table.horizontalHeader().setSectionResizeMode(1,QHeaderView.ResizeToContents)
+  self.table.horizontalHeader().setSectionResizeMode(2,QHeaderView.Stretch)
+  self.table.horizontalHeader().setSectionResizeMode(3,QHeaderView.Stretch)
+  self.table.horizontalHeader().setSectionResizeMode(4,QHeaderView.ResizeToContents)
   self.table.horizontalHeader().sectionResized.connect(lambda *_: self._fit_rows())
-  v.addWidget(self.table)
-  # //remarks: Progress row: a determinate bar for batches plus a busy bar for single requests, so a
-  # //remarks: long API call never looks like the app has frozen.
+  v.addWidget(self.table,1)
   self.progress=QProgressBar(); self.progress.setRange(0,1); self.progress.setValue(0)
   self.progress.setTextVisible(True); self.progress.setFormat('%v/%m'); self.progress.setMaximumHeight(18)
   self.progress.setVisible(False); v.addWidget(self.progress)
+  footer=QHBoxLayout()
   self.status=QLabel('Import images, then click Recognise OCR to load the text lines.')
-  # //remarks: Filenames are echoed in status messages, so keep this label plain text: a file named
-  # //remarks: with '<' or '&' must never be parsed as rich text markup.
-  self.status.setTextFormat(Qt.PlainText); v.addWidget(self.status)
-  tabs=QTabWidget(); tabs.addTab(w,'Translator'); about=QWidget(); av=QVBoxLayout(about); av.addWidget(QLabel('<h2>BlueTL</h2><p>Version v1.0.1</p><p>Published by borneanwingz.fl</p><p>Author: Blue-Wingz @ facedesk</p>')); av.addStretch(); tabs.addTab(about,'About'); self.setCentralWidget(tabs)
-  # //remarks: Apply the starting button state once the widgets exist.
+  self.status.setTextFormat(Qt.PlainText); footer.addWidget(self.status,1)
+  self.ready_label=QLabel('Ready  ●'); self.ready_label.setObjectName('readyStatus'); footer.addWidget(self.ready_label)
+  v.addLayout(footer)
+
+  tabs.addTab(page,'Translator')
+  about=QWidget(); av=QVBoxLayout(about); av.addWidget(QLabel('<h2>BlueTL</h2><p>Version v1.0.2</p><p>Published by borneanwingz.fl</p><p>Author: Blue-Wingz @ facedesk</p>')); av.addStretch(); tabs.addTab(about,'About')
+  w.setStyleSheet('''
+   QWidget { color: #172033; font-family: "Segoe UI"; font-size: 10pt; }
+   QMainWindow { background: #f1f3f7; }
+   QLabel#brandTitle { font-size: 30pt; font-weight: 700; color: #101828; }
+   QLabel#brandSubtitle { font-size: 19pt; color: #667085; padding-top: 8px; }
+   QLabel#connectionBadge { color: #16763a; background: #e4f4e8; border: 1px solid #a7d7b4; border-radius: 12px; padding: 5px 12px; font-weight: 600; }
+   QLabel#cardTitle { font-size: 15pt; font-weight: 700; }
+   QLabel#fieldLabel { color: #475467; font-size: 9pt; font-weight: 600; }
+   QFrame#connectionCard, QFrame#jobCard { background: #ffffff; border: 1px solid #e1e5eb; border-radius: 12px; }
+   QFrame#connectionSummary { background: #ffffff; border: 1px solid #dfe4eb; border-radius: 10px; }
+   QTabWidget::pane { border: 0; background: transparent; }
+   QTabBar::tab { background: #e7e9ee; padding: 8px 18px; border-top-left-radius: 6px; border-top-right-radius: 6px; }
+   QTabBar::tab:selected { background: #ffffff; color: #173b8f; font-weight: 600; border-bottom: 2px solid #2563eb; }
+   QLineEdit, QComboBox { background: #ffffff; border: 1px solid #cbd2dc; border-radius: 6px; padding: 6px 8px; min-height: 22px; }
+   QPushButton { background: #f8f9fb; border: 1px solid #c8ced8; border-radius: 7px; padding: 7px 12px; }
+   QPushButton:hover { background: #edf1f7; }
+   QPushButton:disabled { color: #98a2b3; background: #f4f5f7; }
+   QPushButton#connectAction { color: #ffffff; background: #1fa35b; border: 0; font-weight: 600; min-width: 150px; }
+   QPushButton#connectAction:hover { background: #16834a; }
+   QPushButton#primaryAction { color: #ffffff; background: #2563eb; border: 0; font-size: 12pt; font-weight: 600; }
+   QPushButton#primaryAction:hover { background: #1d4ed8; }
+   QTableWidget { background: #ffffff; alternate-background-color: #fafbfc; border: 1px solid #dfe4eb; border-radius: 8px; }
+   QHeaderView::section { background: #f1f3f5; color: #344054; padding: 8px; border: 0; border-bottom: 1px solid #dfe4eb; font-weight: 600; }
+   QTableWidget::item { padding: 5px; border-bottom: 1px dashed #d8dde5; }
+   QProgressBar { border: 1px solid #d0d5dd; border-radius: 5px; text-align: center; background: #f2f4f7; }
+   QProgressBar::chunk { background: #2563eb; border-radius: 4px; }
+   QLabel#readyStatus { color: #475467; }
+  ''')
+  shell.addWidget(tabs)
+  self.setCentralWidget(w)
   self.update_actions()
+ def set_connection_editor_visible(self,visible):
+  self.connection_card.setVisible(visible)
+  self.connection_summary.setVisible(not visible)
+  if not visible: self.update_connection_summary()
+ def set_refresh_enabled(self,enabled):
+  self.refresh_button.setEnabled(enabled)
+  self.job_refresh_button.setEnabled(enabled)
+ def update_connection_summary(self):
+  url=self.url.text().strip()
+  connected=self.same_connection(url,self.key.text().strip()) and profile_key(url)==self.api_verified
+  if connected:
+   model=self.model.currentText().strip()
+   count=self.model.count()
+   detail=f'{model} · {count} model(s)' if model else f'{count} model(s)'
+   self.connection_summary_text.setText(f'Connected to {url} · {detail}')
+   self.header_connection.setText('● Connected')
+   self.header_connection.setStyleSheet('color:#16763a;background:#e4f4e8;border:1px solid #a7d7b4;border-radius:12px;padding:5px 12px;font-weight:600;')
+  else:
+   self.connection_summary_text.setText('Connection required. Enter your provider details below.')
+   self.header_connection.setText('● Not connected')
+   self.header_connection.setStyleSheet('color:#667085;background:#f2f4f7;border:1px solid #d0d5dd;border-radius:12px;padding:5px 12px;font-weight:600;')
  def load(self):
   try:
    # //remarks: Read with an explicit UTF-8 encoding, matching save(): the config is written with
@@ -904,7 +965,7 @@ class Window(QMainWindow):
   self.restoring=False
   self.model_cache=list(saved.get('models') or [])
   self.refreshed=''
-  self.model.setEnabled(False); self.refresh_button.setEnabled(False)
+  self.model.setEnabled(False); self.set_refresh_enabled(False)
   self.model.blockSignals(True); self.set_models(self.model_cache,keep_current=False)
   chosen=str(saved.get('model') or '').strip()
   self.model.setCurrentText(chosen or (self.model.itemText(0) if self.model.count() else ''))
@@ -928,7 +989,7 @@ class Window(QMainWindow):
   self.restoring=False
   self.connected_url=''; self.connected_key=''; self.refreshed=''; self.model_cache=[]
   self.model.blockSignals(True); self.set_models([],keep_current=False); self.model.setCurrentText(''); self.model.blockSignals(False)
-  self.model.setEnabled(False); self.refresh_button.setEnabled(False); self.connect_button.setEnabled(True)
+  self.model.setEnabled(False); self.set_refresh_enabled(False); self.connect_button.setEnabled(True)
   self.connect_status.setText('Not confirmed - press Save & Connect to load models.'); self.connect_status.setStyleSheet('color:#b45309;padding:2px 2px;')
   self.refresh_provider_list()
   try: self.save()
@@ -1000,6 +1061,7 @@ class Window(QMainWindow):
   if checked: self.status.setText(f'Free models only: showing {count} model(s) whose ID contains "{FREE_MODEL_TOKEN}".')
   else: self.status.setText(f'Free models only off: showing {count} model(s) from the fetched list.')
   self.save()
+  if checked and not any(is_free_model(m) for m in self.model_cache): QMessageBox.information(self,'Free models','No free models detected.')
  def on_connection_edited(self):
   # //remarks: The user changed a connection field after confirming (or before doing so). No request is sent:
   # //remarks: the previous confirmation no longer describes what is on screen, so Save & Connect is re-enabled,
@@ -1016,7 +1078,8 @@ class Window(QMainWindow):
   self.connect_button.setEnabled(True)
   self.connect_status.setText('Not confirmed - press Save & Connect to reload models.')
   self.connect_status.setStyleSheet('color:#b45309;padding:2px 2px;')
-  self.model.setEnabled(False); self.refresh_button.setEnabled(False)
+  self.model.setEnabled(False); self.set_refresh_enabled(False)
+  self.update_connection_summary()
  def same_connection(self,url,key):
   # //remarks: A connection is current only when both fields still equal what was confirmed. The key is compared
   # //remarks: as typed, because a re-typed key is a genuinely different credential even if it looks similar.
@@ -1027,24 +1090,26 @@ class Window(QMainWindow):
   # //remarks: be picked. Requiring the key check matters because some hosts serve /models publicly, so a fetched list
   # //remarks: alone would let a wrong key look connected until the first translation failed.
   url=self.url.text().strip(); key=self.key.text().strip()
+  self.update_connection_summary()
   if self.same_connection(url,key):
    if profile_key(url)!=self.api_verified or not key:
     self.connect_button.setEnabled(False)
     self.connect_status.setText('Model list loaded - press Test API once to verify the API key.')
     self.connect_status.setStyleSheet('color:#b45309;padding:2px 2px;')
-    self.model.setEnabled(False); self.refresh_button.setEnabled(True)
+    self.model.setEnabled(False); self.set_refresh_enabled(True)
     return
    count=self.model.count()
    self.connect_button.setEnabled(False)
    self.connect_status.setText(f'Connected - {count} model(s) available and API key verified.' if count else 'Connected - provider reported no models; type a model ID.')
    self.connect_status.setStyleSheet('color:#1a7f37;padding:2px 2px;')
    self.connect_status.setToolTip(CERT_NOTE.format(days=self.cert_days) if isinstance(self.cert_days,int) and self.cert_days>=0 else 'The provider answered and the API key was verified.')
-   self.model.setEnabled(True); self.refresh_button.setEnabled(True)
+   self.model.setEnabled(True); self.set_refresh_enabled(True)
+   self.set_connection_editor_visible(False)
   else:
    self.connect_button.setEnabled(True)
    self.connect_status.setText('Not confirmed - press Save & Connect to load models.')
    self.connect_status.setStyleSheet('color:#b45309;padding:2px 2px;')
-   self.model.setEnabled(False); self.refresh_button.setEnabled(False)
+   self.model.setEnabled(False); self.set_refresh_enabled(False)
  def confirm_connection(self):
   # //remarks: The explicit confirmation step, mirroring Cline's Done: take the typed Base URL and API key as the
   # //remarks: active connection, then fetch the full model list. Validation happens here, once, with a clear
@@ -1072,6 +1137,7 @@ class Window(QMainWindow):
   # //remarks: with a different key, therefore drops the in-memory verified state instead of inheriting it, which keeps
   # //remarks: the dropdown locked; the fetch that follows proves the new key and remembers the provider again.
   if profile_key(url)!=previous or key!=previous_key: self.api_verified=''
+  self.update_connection_summary()
   self.refresh_provider_list()
   self.refreshed=''
   self.refresh_models(manual=True,url=normalized_url(url),key=key,verify_key=True)
@@ -1111,7 +1177,7 @@ class Window(QMainWindow):
   # //remarks: connection just because the provider is briefly busy.
   self.model_verify=verify_key; self.model_key=key; self.model_check=verify_key
   self.model_request=(self.url.text().strip(),self.key.text().strip())
-  if manual: self.refresh_button.setEnabled(False); self.status.setText(f'Fetching model list from {url}/models ...')
+  if manual: self.set_refresh_enabled(False); self.status.setText(f'Fetching model list from {url}/models ...')
   loader=ModelListLoader(url,key); loader.start()
   # //remarks: Poll from the event loop instead of joining the thread here, so the window stays fully responsive
   # //remarks: and no other action can be re-entered while the request is in flight.
@@ -1130,12 +1196,12 @@ class Window(QMainWindow):
   if self.model_request!=(self.url.text().strip(),self.key.text().strip()):
    self.on_connection_edited()
    return
-  if manual: self.refresh_button.setEnabled(True)
+  if manual: self.set_refresh_enabled(True)
   if loader.is_alive():
    if manual: self.status.setText(f'Model list request timed out after 30 seconds ({url}). The current list is kept.')
    self.connect_status.setText('Connection timed out - check the Base URL and press Save & Connect again.')
    self.connect_status.setStyleSheet('color:#c62828;padding:2px 2px;')
-   self.connect_button.setEnabled(True); self.model.setEnabled(False); self.refresh_button.setEnabled(False)
+   self.connect_button.setEnabled(True); self.model.setEnabled(False); self.set_refresh_enabled(False)
   elif loader.list_error:
    # //remarks: Only claim the list is kept when there actually is one: after moving to a new provider the list has
    # //remarks: already been cleared, so the old wording promised something that was no longer on screen.
@@ -1145,7 +1211,7 @@ class Window(QMainWindow):
    # //remarks: connect line, so the user fixes the field and presses Save & Connect again.
    self.connect_status.setText(f'Connection failed - {loader.list_error}')
    self.connect_status.setStyleSheet('color:#c62828;padding:2px 2px;')
-   self.connect_button.setEnabled(True); self.model.setEnabled(False); self.refresh_button.setEnabled(False)
+   self.connect_button.setEnabled(True); self.model.setEnabled(False); self.set_refresh_enabled(False)
   else:
    # //remarks: A completed request marks the URL as checked whatever the answer contained, so the debounce
    # //remarks: timer does not repeat it. A timed-out or failed request is deliberately NOT marked, so the next
@@ -1242,19 +1308,19 @@ class Window(QMainWindow):
   except ValueError as e: return False,f'invalid JSON from {req.full_url}: {e}',model
  def set_api_status(self,ok,detail=''):
   # //remarks: Single source of truth for the API pill: None=untested, True=verified, False=failed.
-  # //remarks: Symbols are built with chr() so the source stays ASCII and cannot be corrupted by
-  # //remarks: editors/codepages: U+2714 tick, U+2718 cross, U+2014 dash for "not checked".
-  tick,cross,dash_=chr(0x2714),chr(0x2718),chr(0x2014)
-  text=f'API: {tick} OK' if ok else (f'API: {cross} Failed' if ok is False else f'API: {dash_} Not tested')
+  text='API Connected' if ok else ('API Failed' if ok is False else 'API Not tested')
   colour='#1a7f37' if ok else ('#c62828' if ok is False else '#6b7280')
-  self.api_status.setText(text); self.api_status.setStyleSheet(f'color:{colour};font-weight:600;padding:2px 8px;')
+  background='#e7f5eb' if ok else ('#fdecec' if ok is False else '#f2f4f7')
+  border='#b7dfc1' if ok else ('#f2b8b5' if ok is False else '#d0d5dd')
+  self.api_status.setText(text); self.api_status.setStyleSheet(f'color:{colour};background:{background};border:1px solid {border};border-radius:11px;font-weight:600;padding:4px 9px;')
   self.api_status.setToolTip(detail or 'Run Test API, or use Translate all to verify automatically.')
  def set_image_status(self,ok,detail=''):
   # //remarks: None=no images, True=images/archive expanded, False=import produced no usable images.
-  tick,cross,dash_=chr(0x2714),chr(0x2718),chr(0x2014)
-  text=f'Images: {tick} Loaded' if ok else (f'Images: {cross} None' if ok is False else f'Images: {dash_} Not imported')
+  text=f'{len(self.paths)} Images'
   colour='#1a7f37' if ok else ('#c62828' if ok is False else '#6b7280')
-  self.image_status.setText(text); self.image_status.setStyleSheet(f'color:{colour};font-weight:600;padding:2px 8px;')
+  background='#e7f5eb' if ok else ('#fdecec' if ok is False else '#f2f4f7')
+  border='#b7dfc1' if ok else ('#f2b8b5' if ok is False else '#d0d5dd')
+  self.image_status.setText(text); self.image_status.setStyleSheet(f'color:{colour};background:{background};border:1px solid {border};border-radius:11px;font-weight:600;padding:4px 9px;')
   self.image_status.setToolTip(detail)
  def update_actions(self):
   # //remarks: Single place that decides whether a manually typed row is possible. It stays disabled until
