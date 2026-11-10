@@ -9,7 +9,6 @@ Current version: **v1.0.2**
 - **Redesigned interface** with a branded header, a Connection card and a Job card (see Interface below).
 - **Model picker no longer truncated.** It now spans the full width of the Connection card, with the **Free models only** checkbox to its right.
 - **"No free models detected." popup** when **Free models only** is ticked and no model ID in the list contains `free`.
-- The PNG in `assets` is used for both the executable icon and the title-bar icon.
 
 ## What's new in v1.0.1
 
