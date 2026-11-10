@@ -4,6 +4,15 @@ Windows PySide6 manga translation desktop app using any OpenAI-compatible API pr
 
 Current version: **v1.0.2**
 
+The public copy of this README is maintained as `BlueTLReadme.md` in [PrivateRepoReadmes](https://github.com/BorneanWingz/PrivateRepoReadmes). Automatic sync requires the sync workflow to be committed to BlueTL and the `README_SYNC_TOKEN` Actions secret to be configured with a fine-grained GitHub token that has Contents read and write access to PrivateRepoReadmes. Once configured, changes pushed to `main` sync to the public copy, and the workflow can also be run manually from the Actions tab.
+
+## Unreleased changes
+
+- The icon's outer background is transparent.
+- Windows executable properties include the product name and file and product versions from `version_info.txt`.
+- The connection confirmation button is labelled **Save**.
+- The About tab links to the public README and includes an optional support link.
+
 ## What's new in v1.0.2
 
 - **Redesigned interface** with a branded header, a Connection card and a Job card (see Interface below).
@@ -12,16 +21,16 @@ Current version: **v1.0.2**
 
 ## What's new in v1.0.1
 
-- **Cline-style provider connection with an explicit confirmation step.** The Base URL and API key are typed as a draft and nothing is sent while you type; pressing **Save & Connect** confirms them, fetches the full model list, and only then unlocks the Model dropdown. Editing either field marks the connection stale, re-locking the dropdown until you confirm again.
+- **Cline-style provider connection with an explicit confirmation step.** The Base URL and API key are typed as a draft and nothing is sent while you type; pressing **Save** confirms them, fetches the full model list, and only then unlocks the Model dropdown. Editing either field marks the connection stale, re-locking the dropdown until you confirm again.
 - **No provider is hard-coded in the executable.** The Base URL, API key, and model list are no longer compiled into the build: the fields start empty and everything you enter is remembered in `%APPDATA%\BlueTL\config.json`, so your provider, key, model, and tick-box state come back when you reopen the app.
 - **New "Free models only" tick box** directly under the model picker: it narrows the dropdown to the fetched model IDs that contain the text `free` (case-insensitive). Unticking restores the full list instantly, with no extra request.
-- **Saved providers per Base URL.** Each Base URL is remembered as its own profile (key, model list, chosen model). Pick one from **Saved providers**, add one by entering a new Base URL and pressing **Save & Connect**, or remove it with **Delete**. An API key is stored (DPAPI-protected) only after a model list was fetched successfully with it, and a newly fetched list resets the Model picker to its first entry.
+- **Saved providers per Base URL.** Each Base URL is remembered as its own profile (key, model list, chosen model). Pick one from **Saved providers**, add one by entering a new Base URL and pressing **Save**, or remove it with **Delete**. An API key is stored (DPAPI-protected) only after a model list was fetched successfully with it, and a newly fetched list resets the Model picker to its first entry.
 - **PSD support for OCR.** Layered Photoshop `.psd` pages are accepted directly and from inside ZIP/RAR archives; `psd-tools` composites the visible layers into one page image before text detection, including 16-bit documents that Pillow's built-in PSD plugin rejects.
 - **Fixed: crash on startup with a non-ASCII settings file.** The config is written as UTF-8, but it was read back with the Windows locale codec, so any non-ASCII character (a provider name, an accented folder path) raised `UnicodeDecodeError: 'charmap' codec can't decode byte 0x81` during startup and left the app unable to open. The file is now read as UTF-8, matching how it is written, and a damaged or unreadable config is treated as a missing one instead of blocking startup.
 
 ## Interface
 
-The Translator tab uses a compact connection summary once a provider is verified; choose **Change** to reopen the Connection card and edit provider details. The Job card keeps the target language, model refresh, API and image status, and primary Import, Recognise OCR, and Translate all actions together. Test API, export, and row-editing actions are grouped below, with the translation table and live status area filling the remaining space.
+The Translator tab uses a compact connection summary once a provider is verified; choose **Change** to reopen the Connection card and edit provider details. The Job card keeps the target language, model refresh, API and image status, and primary Import, Recognise OCR, and Translate all actions together. Test API, export, and row-editing actions are grouped below, with the translation table and live status area filling the remaining space. The About tab links to the public README and to an optional [buy me a cuppa](https://buymeacoffee.com/DrLwSii) page.
 
 ## Run from source
 
