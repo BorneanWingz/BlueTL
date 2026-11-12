@@ -56,10 +56,10 @@ class MockHandler(BaseHTTPRequestHandler):
     status = 200
     auth_seen = None
     # //remarks: Count of /models requests served, so a test can prove that typing in the connection fields sends
-    # //remarks: nothing and that only Save & Connect triggers discovery.
+    # //remarks: nothing and that only Save triggers discovery.
     requests = 0
     # //remarks: The key check goes through /chat/completions, exactly like the real provider. The mock answers it so
-    # //remarks: Save & Connect can prove a key, and a rejected key can be simulated without a network.
+    # //remarks: Save can prove a key, and a rejected key can be simulated without a network.
     chat_status = 200
     chat_requests = 0
     chat_auth = None
@@ -169,7 +169,7 @@ def wait_refresh(window, timeout=20):
     qapp.processEvents()
 
 def wait_idle(window, timeout=25):
-    # //remarks: Save & Connect finishes with a key check, which runs on the same poll tick as the fetch. Waiting for
+    # //remarks: Save finishes with a key check, which runs on the same poll tick as the fetch. Waiting for
     # //remarks: the loader, the flag, and the timer to all settle means a test never starts the next provider while
     # //remarks: the previous provider's result is still in flight - that would overwrite the newer list.
     end = _time.monotonic() + timeout
@@ -221,10 +221,10 @@ w.refresh_models(manual=True); wait_refresh(w)
 after = [w.model.itemText(i) for i in range(w.model.count())]
 check('failed manual refresh keeps the (now empty) list', after == [], str(after))
 check('failed manual refresh keeps the (now empty) cache', w.model_cache == [], str(w.model_cache))
-# //remarks: After a failed fetch the connection is NOT confirmed, so Refresh stays disabled and Save & Connect is
+# //remarks: After a failed fetch the connection is NOT confirmed, so Refresh stays disabled and Save is
 # //remarks: the button that must be pressed again - the user confirms before the app contacts the provider.
 check('failed refresh leaves Refresh disabled (re-connect required)', w.refresh_button.isEnabled() is False)
-check('failed refresh re-enables Save & Connect', w.connect_button.isEnabled() is True)
+check('failed refresh re-enables Save', w.connect_button.isEnabled() is True)
 check('failed refresh reports in status', 'could not be fetched' in w.status.text() or 'timed out' in w.status.text(), w.status.text())
 check('failed manual refresh reports in status', 'could not be fetched' in w.status.text() or 'timed out' in w.status.text(), w.status.text())
 
@@ -347,7 +347,7 @@ check('non-ASCII config restores the model list', nu_ok and w_nu.model_cache == 
 bluetl.CFG.unlink(missing_ok=True)
 
 # ---- 6. Cline-style connection confirmation ------------------------------------
-# //remarks: Same flow as Cline's provider panel: type the Base URL and API key, press Save & Connect, and only
+# //remarks: Same flow as Cline's provider panel: type the Base URL and API key, press Save, and only
 # //remarks: then is the provider contacted and the Model dropdown unlocked. Nothing is sent while typing.
 MockHandler.status = 200
 MockHandler.payload = {'data': [{'id': 'gate-free-model'}, {'id': 'gate-paid-model'}]}
@@ -356,7 +356,7 @@ before_requests = MockHandler.requests
 wg = bluetl.Window(); wg.model_timer.stop()
 check('Model dropdown is locked before confirming', wg.model.isEnabled() is False)
 check('Refresh is locked before confirming', wg.refresh_button.isEnabled() is False)
-check('Save & Connect is enabled on a fresh window', wg.connect_button.isEnabled() is True)
+check('Save is enabled on a fresh window', wg.connect_button.isEnabled() is True)
 check('nothing connected yet', wg.connected_url == '' and wg.connected_key == '')
 
 # Typing must NOT fire a request (the old debounce did).
@@ -373,25 +373,25 @@ gate_ids = [wg.model.itemText(i) for i in range(wg.model.count())]
 check('confirming fetches the model list', 'gate-free-model' in gate_ids, str(gate_ids))
 check('confirming unlocks the Model dropdown', wg.model.isEnabled() is True)
 check('confirming enables Refresh', wg.refresh_button.isEnabled() is True)
-check('confirming disables Save & Connect', wg.connect_button.isEnabled() is False)
+check('confirming disables Save', wg.connect_button.isEnabled() is False)
 check('connect line reports success', 'Connected' in wg.connect_status.text(), wg.connect_status.text())
 check('connection records the confirmed values', wg.connected_url == base and wg.connected_key == 'secret-key')
-check('Save & Connect proves the API key', wg.api_verified == bluetl.profile_key(base), f'{wg.api_verified!r} {bluetl.profile_key(base)!r}')
+check('Save proves the API key', wg.api_verified == bluetl.profile_key(base), f'{wg.api_verified!r} {bluetl.profile_key(base)!r}')
 check('confirmed provider is remembered', bluetl.profile_key(base) in wg.profiles, str(list(wg.profiles)))
 check('remembered provider is marked verified', (wg.profiles.get(bluetl.profile_key(base)) or {}).get('verified') is True, str(wg.profiles.get(bluetl.profile_key(base))))
 
 # A later edit to either field must invalidate the confirmation and re-lock the Model picker.
 wg.url.setText(base + '/changed'); wg.on_connection_edited()
 check('editing the URL re-locks the Model dropdown', wg.model.isEnabled() is False)
-check('editing the URL re-enables Save & Connect', wg.connect_button.isEnabled() is True)
+check('editing the URL re-enables Save', wg.connect_button.isEnabled() is True)
 check('editing the URL disables Refresh', wg.refresh_button.isEnabled() is False)
 check('editing reports not confirmed', 'Not confirmed' in wg.connect_status.text(), wg.connect_status.text())
 wg.url.setText(base); wg.on_connection_edited()
 # //remarks: An uncommitted edit restores that provider's own catalogue. Because the text matches the confirmed
 # //remarks: connection again, the verified state applies again - but the key still has to be proved, so the dropdown
-# //remarks: stays locked until Test API or Save & Connect succeeds.
+# //remarks: stays locked until Test API or Save succeeds.
 check('reverting the URL restores that provider\'s models', wg.model.findText('gate-free-model') >= 0, str([wg.model.itemText(i) for i in range(wg.model.count())]) + ' PROFILE=' + str(wg.profiles.get(bluetl.profile_key(base))))
-check('reverting the URL keeps Save & Connect disabled (same connection again)', wg.connect_button.isEnabled() is False)
+check('reverting the URL keeps Save disabled (same connection again)', wg.connect_button.isEnabled() is False)
 check('reverting the URL keeps the Model list locked until the key is proved', wg.model.isEnabled() is False)
 wg.key.setText('different-key'); wg.on_connection_edited()
 check('editing the key re-locks the Model dropdown', wg.model.isEnabled() is False)
@@ -415,7 +415,7 @@ wg.save()
 wr = bluetl.Window(); wr.model_timer.stop()
 check('restored config comes back confirmed', wr.connected_url == base and wr.connected_key == 'secret-key')
 check('restored config unlocks the Model dropdown', wr.model.isEnabled() is True)
-check('restored config keeps Save & Connect disabled', wr.connect_button.isEnabled() is False)
+check('restored config keeps Save disabled', wr.connect_button.isEnabled() is False)
 
 # //remarks: The mock server stays up until the very end: the connection, provider-switching, and key-gate sections
 # //remarks: below all need it. Shutting it down here made every later request fail with "actively refused".
@@ -551,8 +551,8 @@ MockHandler.payload = {'data': [{'id': 'prov-a-1'}, {'id': 'prov-a-2'}]}
 wga = bluetl.Window(); wga.model_timer.stop()
 wga.url.setText(base); wga.key.setText('secret-key'); wga.on_connection_edited()
 wga.confirm_connection(); wait_idle(wga)
-check('Save & Connect verifies the key and unlocks the dropdown', wga.api_verified == bluetl.profile_key(base) and wga.model.isEnabled() is True, f'{wga.api_verified!r} {wga.model.isEnabled()}')
-check('Save & Connect spends one key check', MockHandler.chat_requests >= 1, str(MockHandler.chat_requests))
+check('Save verifies the key and unlocks the dropdown', wga.api_verified == bluetl.profile_key(base) and wga.model.isEnabled() is True, f'{wga.api_verified!r} {wga.model.isEnabled()}')
+check('Save spends one key check', MockHandler.chat_requests >= 1, str(MockHandler.chat_requests))
 check('verification is reported in status', 'verified' in wga.status.text().lower(), wga.status.text())
 
 # //remarks: A background refresh must not spend another completion or revoke the verification.
@@ -648,7 +648,14 @@ wl = bluetl.Window(); wl.model_timer.stop()
 row_widget = wl.model.parentWidget()
 check('Refresh models shares the Model row', wl.refresh_button.parent() is row_widget)
 check('Model row holds the picker, the button and the free-only box (picker leftmost)', row_widget.layout().count() == 3 and row_widget.layout().itemAt(0).widget() is wl.model and row_widget.layout().itemAt(2).widget() is wl.free_only, str(row_widget.layout().count()))
-check('Save & Connect label is exact', wl.connect_button.text() == 'Save & Connect', repr(wl.connect_button.text()))
+check('Save label is exact', wl.connect_button.text() == 'Save', repr(wl.connect_button.text()))
+tabs = wl.findChild(bluetl.QTabWidget)
+about = tabs.widget(next(i for i in range(tabs.count()) if tabs.tabText(i) == 'About'))
+about_layout = about.layout()
+about_details = about_layout.itemAt(0).widget()
+support = about_layout.itemAt(2).widget()
+check('About Readme follows author and opens the public README', about_details.openExternalLinks() and 'Author: Blue-Wingz @ facedesk</p><p><a href="https://github.com/BorneanWingz/PrivateRepoReadmes/blob/main/BlueTLReadme.md">Readme</a>' in about_details.text(), about_details.text())
+check('About support link is below a stretch and opens the cuppa page', about_layout.itemAt(1).spacerItem() is not None and support.openExternalLinks() and support.text() == 'If you enjoy my app, please consider to <a href="https://buymeacoffee.com/DrLwSii">buy me a cuppa</a>!', support.text())
 check('OCR button uses British spelling', wl.ocr_button.text() == 'Recognise OCR', repr(wl.ocr_button.text()))
 check('table header uses British spelling', wl.table.horizontalHeaderItem(2).text() == 'Recognised text', wl.table.horizontalHeaderItem(2).text())
 check('status hint uses British spelling', 'Recognise OCR' in wl.status.text(), wl.status.text())
@@ -666,6 +673,5 @@ server.shutdown()
 print()
 print('FAILURES:', failures if failures else 'none')
 sys.exit(1 if failures else 0)
-
 
 

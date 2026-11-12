@@ -1,36 +1,78 @@
-# BlueTL
+# BlueTL — Manga Translation Desktop App
 
-Windows PySide6 manga translation desktop app using any OpenAI-compatible API provider.
+[![Version](https://img.shields.io/badge/version-v1.0.2-magenta)](https://github.com/BorneanWingz/BlueTL)
+[![Platform](https://img.shields.io/badge/platform-Windows-blue)]()
+[![License](https://img.shields.io/badge/license-MIT%20core%20%2F%20GPL--3.0%20component-green)](LICENSE.md)
+[![OCR](https://img.shields.io/badge/OCR-local-orange)]()
 
-Current version: **v1.0.2**
+<div align="center">
+  <img src="assets/bluetl.png" alt="BlueTL icon" width="200" height="200">
+  <h1>🔷 BlueTL</h1>
+  <h3><em>Manga translation desktop app.</em></h3>
+</div>
 
-The public copy of this README is maintained as `BlueTLReadme.md` in [PrivateRepoReadmes](https://github.com/BorneanWingz/PrivateRepoReadmes). Automatic sync requires the sync workflow to be committed to BlueTL and the `README_SYNC_TOKEN` Actions secret to be configured with a fine-grained GitHub token that has Contents read and write access to PrivateRepoReadmes. Once configured, changes pushed to `main` sync to the public copy, and the workflow can also be run manually from the Actions tab.
+## About
 
-## Unreleased changes
+BlueTL is a Windows PySide6 application for translating manga pages. It detects text
+regions locally, recognises the text with Manga OCR, sends untranslated rows to any
+OpenAI-compatible API provider, and exports TXT or DOCX results.
 
-- The icon's outer background is transparent.
-- Windows executable properties include the product name and file and product versions from `version_info.txt`.
-- The connection confirmation button is labelled **Save**.
-- The About tab links to the public README and includes an optional support link.
+- Runs from source or as a portable PyInstaller folder.
+- Local OCR does not require an API request.
+- Translation requires an internet connection to the configured provider.
+- No provider, API key, or model list is compiled into the executable.
+- Settings are saved in `%APPDATA%\BlueTL\config.json`.
+- API keys are protected with Windows DPAPI and are never stored as plaintext.
 
-## What's new in v1.0.2
 
-- **Redesigned interface** with a branded header, a Connection card and a Job card (see Interface below).
-- **Model picker no longer truncated.** It now spans the full width of the Connection card, with the **Free models only** checkbox to its right.
-- **"No free models detected." popup** when **Free models only** is ticked and no model ID in the list contains `free`.
+## Features
 
-## What's new in v1.0.1
+### Provider connection
 
-- **Cline-style provider connection with an explicit confirmation step.** The Base URL and API key are typed as a draft and nothing is sent while you type; pressing **Save** confirms them, fetches the full model list, and only then unlocks the Model dropdown. Editing either field marks the connection stale, re-locking the dropdown until you confirm again.
-- **No provider is hard-coded in the executable.** The Base URL, API key, and model list are no longer compiled into the build: the fields start empty and everything you enter is remembered in `%APPDATA%\BlueTL\config.json`, so your provider, key, model, and tick-box state come back when you reopen the app.
-- **New "Free models only" tick box** directly under the model picker: it narrows the dropdown to the fetched model IDs that contain the text `free` (case-insensitive). Unticking restores the full list instantly, with no extra request.
-- **Saved providers per Base URL.** Each Base URL is remembered as its own profile (key, model list, chosen model). Pick one from **Saved providers**, add one by entering a new Base URL and pressing **Save**, or remove it with **Delete**. An API key is stored (DPAPI-protected) only after a model list was fetched successfully with it, and a newly fetched list resets the Model picker to its first entry.
-- **PSD support for OCR.** Layered Photoshop `.psd` pages are accepted directly and from inside ZIP/RAR archives; `psd-tools` composites the visible layers into one page image before text detection, including 16-bit documents that Pillow's built-in PSD plugin rejects.
-- **Fixed: crash on startup with a non-ASCII settings file.** The config is written as UTF-8, but it was read back with the Windows locale codec, so any non-ASCII character (a provider name, an accented folder path) raised `UnicodeDecodeError: 'charmap' codec can't decode byte 0x81` during startup and left the app unable to open. The file is now read as UTF-8, matching how it is written, and a damaged or unreadable config is treated as a missing one instead of blocking startup.
+Enter an OpenAI-compatible **Base URL** and **API key**, then press **Save**. The app
+fetches the provider's `GET /models` response before enabling the Model picker. Editing
+either connection field makes the connection stale and locks the picker until it is
+confirmed again.
+
+Provider model lists are cached per Base URL and restored on the next launch, including
+when the provider is temporarily offline. A bare host such as `localhost:1234` receives
+a scheme and `/v1` automatically. A model ID can also be typed manually.
+
+**Free models only** filters fetched model IDs containing `free` (case-insensitive).
+When a non-free model is selected, free models are attempted first, followed by the
+selected model and then other models reported by the provider.
+
+### Import and OCR
+
+BlueTL accepts JPG, JPEG, PNG, WebP, and PSD images, plus ZIP and RAR archives containing
+them. Files are ordered naturally by name, so `chapter-2.jpg` precedes `chapter-10.jpg`.
+Layered PSD files are composited with `psd-tools`, including 16-bit documents, before OCR.
+
+Text detection uses the vendored `comic_text_detector` package. Manga OCR is run only on
+detected text blocks; a page with no detected block is reported as having no text instead
+of sending the whole page to the OCR model. Damaged images are skipped while the rest of
+the batch continues.
+
+### Review and translation
+
+- **Recognise OCR** runs local OCR without spending API tokens.
+- **Translate all** recognises first when needed, then translates only rows without a translation.
+- **Add row** inserts an editable row below the selected line.
+- **Delete row** removes unwanted or hallucinated lines.
+
+### Export
+
+Translation rows can be exported to TXT or DOCX. Clearing a Translation cell makes that
+row eligible for translation again.
 
 ## Interface
 
-The Translator tab uses a compact connection summary once a provider is verified; choose **Change** to reopen the Connection card and edit provider details. The Job card keeps the target language, model refresh, API and image status, and primary Import, Recognise OCR, and Translate all actions together. Test API, export, and row-editing actions are grouped below, with the translation table and live status area filling the remaining space. The About tab links to the public README and to an optional [buy me a cuppa](https://buymeacoffee.com/DrLwSii) page.
+The Translator tab has a Connection card and a Job card. The Job card contains target
+language, model refresh, API status, image status, and the primary Import, Recognise OCR,
+and Translate all actions. Test API, export, and row-editing actions are grouped below.
+The About tab shows version and author information and links to the public README and
+optional [support page](https://buymeacoffee.com/DrLwSii).
+
 
 ## Run from source
 
@@ -41,12 +83,67 @@ python -m pip install -r requirements.txt
 python app.py
 ```
 
-Enter your provider's OpenAI-compatible **Base URL** and **API key**, then press **Save**. **No provider, key, or model list is compiled into the executable**, and nothing is sent to the network while you are still typing: the two connection fields are only a draft until you confirm them, exactly like Cline's provider panel. Pressing **Save** is the confirmation step — it validates that both fields are filled, persists them, fetches the full model list from the provider's own `GET /models` endpoint, and unlocks the **Model** dropdown. Until a provider has answered, the Model dropdown and **Refresh models** stay disabled, so a model can never be chosen against a provider that has not responded. Editing either field afterwards marks the connection stale: the dropdown locks again and the button reactivates, so the list on screen always belongs to the credentials currently confirmed. The status line beside the button reports `Connected - N model(s) available`, `Connection failed - <reason>`, or `Connection timed out`. Everything you enter is remembered in `%APPDATA%\BlueTL\config.json`, so a confirmed provider reconnects on the next launch without re-confirming. The API key is protected with Windows DPAPI and stored in the per-user config file; it is never written as plaintext. A `https://host/v1` URL is used as given, a bare host such as `localhost:1234` gains a scheme and `/v1` automatically, and if the OpenAI-style path answers nothing the site root is tried as well. The fetched list is cached, so you see your provider's models again on the next startup even while offline, and a model ID outside the list can always be typed by hand (it is kept as the current selection and as a dropdown entry). The **Free models only** tick box directly under the model picker narrows the dropdown to the fetched model IDs that contain the text `free` (case-insensitive), and unticking it instantly restores the full provider list without another request. When a non-free model is selected, free models are still attempted first, then the selected model, then the other models the provider reported. Click **Translate all** to recognise and translate in one step. Click **Recognize OCR** first when you want to run the local OCR on its own and review or correct the recognized lines before any API tokens are spent; **Translate all** then reuses those rows instead of recognizing again. Only rows without a translation are sent to the API. Importing a new selection clears the previous batch's rows. **Add row** is enabled after recognition and inserts an empty row below the selected line for manual text entry; **Delete row** removes the selected line so invented noise can be cleared. The import dialog reopens in the folder used by the previous import. Clear a Translation cell to have that row translated again.
+## Build a portable executable
 
+Run `build.ps1` from PowerShell in the repository root. The script installs dependencies,
+checks the icon, version information, OCR models, and vendored detector, then runs
+PyInstaller with the data-collection flags required by the frozen application.
 
-## Current scope
+```powershell
+.\build.ps1
+```
 
-The app imports JPG, JPEG, PNG, WebP, and PSD images, plus ZIP archives and RAR archives containing those images. A layered Photoshop `.psd` page is flattened first: `psd-tools` composites the visible layers (blend modes, opacity, masks) into one RGB page image, so the OCR reads exactly what Photoshop shows - hidden construction layers never reach the recogniser. Pillow's own PSD plugin is not used because it rejects 16-bit documents, which are common for manga artwork. The flattened page is cached as a PNG, so a page is only composited once per run. The order files were selected in is ignored: imported images are ordered by file name using natural numeric order (`chapter-2.jpg` before `chapter-10.jpg`), and images extracted from an archive keep that same name order, so page numbers always follow the file names. **Recognise OCR** runs Manga OCR locally and loads editable page/panel/OCR rows without calling the translation API; it is optional, because **Translate all** runs the same local OCR automatically when no rows have been recognised yet. 
-**Translate all** sends only rows without a translation through the configured OpenAI-compatible API with model fallbacks and exports TXT/DOCX. After recognition, **Add row** inserts an editable row below the selected line and **Delete row** removes the selected line, so noise lines can be cleared. Each OCR row keeps its source crop. Import and Recognise OCR are prominent job actions; Test API, export, and row-editing actions are grouped separately in the Job card. Rows with independent suspicion checks are marked `CHECK` and are held back from translation until reviewed and approved by clearing the marker. The folder of the last import is remembered and reopened by the next import dialog. A new import clears the previous batch's OCR and translation rows. Text detection is done by kha-white's comic-text-detector, the detector mokuro uses; it is vendored under `comic_text_detector\` and loaded from `assets\comic-text-detector-model\comictextdetector.pt`. Manga OCR is then called only on the detected text blocks; if no block is detected, the page is reported as having no text rather than sending a whole page to the model, which can hallucinate text on blank input. The linked GLM-OCR-Manga-LoRA is a separate generative vision-language LoRA adapter over `zai-org/GLM-OCR`; it is not enabled by default because it requires the much larger GLM-OCR base model and also does not provide a detector or confidence score. Damaged images are reported and skipped so the rest of the batch can continue. Recognised rows receive sequential panel numbers, and manually inserted rows are placed below the selected line with later rows renumbered on that page. 
+The output is `dist\BlueTL\BlueTL.exe`. The script also verifies that the bundled unidic
+dictionary, detector weights, Transformers image-processing modules, and torchvision
+compiled extensions are present. See [BUILD.md](BUILD.md) for the build procedure and
+release contents.
 
-Both OCR stages are local and read their weights from the bundle: Manga OCR from `assets\manga-ocr-model` and text detection from `assets\comic-text-detector-model\comictextdetector.pt` (about 520 MB together). The detector weights are a one-time download from the manga-image-translator release `beta-0.2.1` and, like the `kha-white/manga-ocr-base` weights, the file must already be in place before OCR can run - a missing or truncated file is reported in the OCR error dialog together with its exact path. Detection takes a few seconds per page on CPU, so the first page of a batch also pays the one-off detector load time. Translation through remote API inference and still requires internet access each time. The API's model names do not provide downloadable model weights; the provider would need to publish compatible weights or a local server package before those models could run offline. Do not attempt to scrape or download model data from the API.
+## Model files
+
+The Manga OCR model is expected under `assets\manga-ocr-model`. The detector weights are
+expected at `assets\comic-text-detector-model\comictextdetector.pt` and are not committed
+by Git. Download the detector weights from the release documented in
+[`comic_text_detector/VENDOR.md`](comic_text_detector/VENDOR.md).
+
+Both OCR stages are local. Translation through a remote API still requires internet access;
+provider model names do not automatically provide downloadable local weights.
+
+## Version history
+
+### v1.0.2
+
+- Redesigned interface with branded header, Connection card, and Job card.
+- Expanded model picker and added the **No free models detected** warning.
+- Added transparent icon background and Windows product/version metadata.
+- Renamed the connection confirmation action to **Save**.
+
+### v1.0.1
+
+- Added explicit provider confirmation and model discovery through `GET /models`.
+- Added saved providers per Base URL and DPAPI-protected API-key storage.
+- Added the **Free models only** filter.
+- Added PSD support, including PSD files inside ZIP/RAR archives.
+- Fixed startup failures caused by non-ASCII or damaged UTF-8 settings files.
+
+## Credits
+
+BlueTL was informed by the architecture and documentation of these MIT-licensed projects:
+
+- [KŌMA Studio](https://git.mitgai.net/klaus-2/koma-studio)
+- [manga-translation](https://github.com/M3MONs/manga-translation)
+- [Lumina](https://github.com/lumina-tl/lumina)
+
+BlueTL uses PySide6, OpenAI's Python client, python-docx, Pillow, Manga OCR,
+OpenCV, PyTorch/torchvision, psd-tools, rarfile, and the vendored comic-text-detector.
+Their respective licenses remain applicable. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+## License
+
+The BlueTL application code is released under the MIT License. The vendored
+`comic_text_detector\` component is GPL-3.0; distributed builds containing it must comply
+with GPL-3.0 and provide the complete corresponding source. See [LICENSE.md](LICENSE.md).
+
+---
+
+*BlueTL · Version v1.0.2 · Author: Blue-Wingz @ facedesk · Published by borneanwingz.fl*
+

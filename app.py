@@ -564,7 +564,7 @@ class Window(QMainWindow):
    # //remarks: Result collection for the discovery worker: the poll timer ticks while a fetch is in flight and
    # //remarks: poll_models() finishes the step once the worker is done or the wall-clock deadline passed.
    self.model_loader=None; self.model_url=''; self.model_deadline=0.0; self.model_manual=False; self.model_key=''; self.model_verify=False; self.model_check=False; self.model_request=('','')
-   # //remarks: The key used for the fetch and whether that fetch is the explicit Save & Connect press, which is the
+   # //remarks: The key used for the fetch and whether that fetch is the explicit Save press, which is the
    # //remarks: only path allowed to spend a completion proving the key.
    # //remarks: URL edited while a fetch was already in flight; poll_models() runs it right after the current
    # //remarks: request finishes, so a corrected Base URL is never left with the previous provider's models.
@@ -575,7 +575,7 @@ class Window(QMainWindow):
    # //remarks: undoing the edit) is skipped and auto-discovery stays quiet.
    self.refreshed=''
    # //remarks: Cline-style confirmation gate. The Base URL and API key are typed as a *draft* and are not used
-   # //remarks: until the user presses Save & Connect. self.connected_url/connected_key hold the values that were
+   # //remarks: until the user presses Save. self.connected_url/connected_key hold the values that were
    # //remarks: actually confirmed; the model dropdown stays disabled until a list has been fetched for them. A
    # //remarks: later edit to either field makes the connection stale, so the button reactivates and the user
    # //remarks: re-confirms instead of the app silently talking to a provider they did not intend.
@@ -588,7 +588,7 @@ class Window(QMainWindow):
    self.profiles={}
    # //remarks: A provider's /models catalogue is public at some hosts (it answers 200 without a key), so a fetched
    # //remarks: list proves the URL, not the key. The Model dropdown therefore stays locked until a real key check
-   # //remarks: succeeds - Test API, or the one-token probe that Save & Connect runs when the list has no models to
+   # //remarks: succeeds - Test API, or the one-token probe that Save runs when the list has no models to
    # //remarks: probe. self.api_verified records the profile key that passed.
    self.api_verified=''
    # //remarks: Days left on the provider's certificate, filled in after a successful fetch. A known expiry is worth
@@ -602,7 +602,7 @@ class Window(QMainWindow):
    if icon_path.is_file(): self.setWindowIcon(QIcon(str(icon_path)))
    self.ui(); self.load()
  def ui(self):
-  w=QWidget(); shell=QVBoxLayout(w); shell.setContentsMargins(18,12,18,8); shell.setSpacing(10)
+  w=QWidget(); shell=QVBoxLayout(w); shell.setContentsMargins(14,10,14,8); shell.setSpacing(8)
   brand=QHBoxLayout(); brand.setSpacing(10)
   title=QLabel('BlueTL'); title.setObjectName('brandTitle')
   subtitle=QLabel('Manga Translator'); subtitle.setObjectName('brandSubtitle')
@@ -610,9 +610,9 @@ class Window(QMainWindow):
   self.header_connection=QLabel('● Not connected'); self.header_connection.setObjectName('connectionBadge')
   brand.addWidget(self.header_connection); shell.addLayout(brand)
   tabs=QTabWidget()
-  page=QWidget(); v=QVBoxLayout(page); v.setContentsMargins(8,10,8,8); v.setSpacing(12)
+  page=QWidget(); v=QVBoxLayout(page); v.setContentsMargins(6,8,6,6); v.setSpacing(9)
   self.connection_summary=QFrame(); self.connection_summary.setObjectName('connectionSummary')
-  summary=QHBoxLayout(self.connection_summary); summary.setContentsMargins(12,8,10,8); summary.setSpacing(8)
+  summary=QHBoxLayout(self.connection_summary); summary.setContentsMargins(10,6,8,6); summary.setSpacing(8)
   self.connection_summary_text=QLabel('Connection required. Enter your provider details below.')
   self.connection_summary_text.setTextFormat(Qt.PlainText)
   summary.addWidget(self.connection_summary_text,1)
@@ -622,10 +622,15 @@ class Window(QMainWindow):
   self.connection_summary.hide(); v.addWidget(self.connection_summary)
 
   self.connection_card=QFrame(); self.connection_card.setObjectName('connectionCard')
-  connection=QVBoxLayout(self.connection_card); connection.setContentsMargins(18,14,18,14); connection.setSpacing(10)
+  connection=QVBoxLayout(self.connection_card); connection.setContentsMargins(14,10,14,10); connection.setSpacing(8)
   connection_heading=QHBoxLayout()
   connection_title=QLabel('Connection'); connection_title.setObjectName('cardTitle')
   connection_heading.addWidget(connection_title); connection_heading.addStretch()
+  self.connect_button=QPushButton('Save')
+  self.connect_button.setObjectName('connectAction')
+  self.connect_button.setToolTip('Confirm the Base URL and API key. Pressing this fetches the full model list from the provider and, once the key is proved, enables the Model dropdown.')
+  self.connect_button.clicked.connect(self.confirm_connection)
+  connection_heading.addWidget(self.connect_button)
   self.hide_connection_button=QPushButton('Hide')
   self.hide_connection_button.clicked.connect(lambda: self.set_connection_editor_visible(False))
   connection_heading.addWidget(self.hide_connection_button); connection.addLayout(connection_heading)
@@ -643,13 +648,13 @@ class Window(QMainWindow):
 
   self.url=QLineEdit(); self.url.setPlaceholderText('https://your-provider.example/v1')
   self.key=QLineEdit(); self.key.setEchoMode(QLineEdit.Password); self.key.setPlaceholderText('API key')
-  fields=QGridLayout(); fields.setHorizontalSpacing(18); fields.setVerticalSpacing(6)
+  fields=QGridLayout(); fields.setHorizontalSpacing(18); fields.setVerticalSpacing(10)
   url_label=QLabel('OpenAI-compatible Base URL'); url_label.setObjectName('fieldLabel')
   key_label=QLabel('API key'); key_label.setObjectName('fieldLabel')
   fields.addWidget(url_label,0,0); fields.addWidget(key_label,0,1)
   fields.addWidget(self.url,1,0); fields.addWidget(self.key,1,1)
 
-  self.model=QComboBox(); self.model.setEditable(True); self.model.setToolTip('Selects the model tried first; remaining models in the list are automatic fallbacks. The list is fetched from your Base URL after you press Save & Connect.')
+  self.model=QComboBox(); self.model.setEditable(True); self.model.setToolTip('Selects the model tried first; remaining models in the list are automatic fallbacks. The list is fetched from your Base URL after you press Save.')
   self.model.setEnabled(False)
   self.free_only=QCheckBox('Free models only')
   self.free_only.setToolTip('Show only the models whose ID contains the text "free" (searched in the list fetched from your Base URL).')
@@ -669,12 +674,8 @@ class Window(QMainWindow):
   self.key.textEdited.connect(lambda _: self.on_connection_edited())
   self.url.textChanged.connect(lambda _: self.on_url_changed())
 
-  self.connect_button=QPushButton('Save & Connect')
-  self.connect_button.setObjectName('connectAction')
-  self.connect_button.setToolTip('Confirm the Base URL and API key. Pressing this fetches the full model list from the provider and, once the key is proved, enables the Model dropdown.')
-  self.connect_button.clicked.connect(self.confirm_connection)
   self.connect_status=QLabel(); self.connect_status.setTextFormat(Qt.PlainText)
-  connect_row=QHBoxLayout(); connect_row.setSpacing(12); connect_row.addWidget(self.connect_button); connect_row.addWidget(self.connect_status,1)
+  connect_row=QHBoxLayout(); connect_row.setSpacing(0); connect_row.addWidget(self.connect_status,1)
   connection.addLayout(connect_row)
   v.addWidget(self.connection_card)
 
@@ -684,8 +685,8 @@ class Window(QMainWindow):
   self.set_api_status(None); self.set_image_status(None)
 
   self.job_card=QFrame(); self.job_card.setObjectName('jobCard')
-  job=QVBoxLayout(self.job_card); job.setContentsMargins(18,14,18,14); job.setSpacing(10)
-  job_title=QLabel('Job'); job_title.setObjectName('cardTitle'); job.addWidget(job_title)
+  job=QVBoxLayout(self.job_card); job.setContentsMargins(14,10,14,10); job.setSpacing(8)
+  job_title=QLabel('Translation Settings'); job_title.setObjectName('cardTitle'); job.addWidget(job_title)
   job_controls=QHBoxLayout(); job_controls.setSpacing(10)
   language_group=QVBoxLayout(); language_group.setSpacing(4)
   language_label=QLabel('Target language'); language_label.setObjectName('fieldLabel')
@@ -712,7 +713,6 @@ class Window(QMainWindow):
   import_button.clicked.connect(self.images)
   translate_button=QPushButton('Translate all')
   translate_button.setObjectName('primaryAction')
-  translate_button.setMinimumHeight(42)
   translate_button.clicked.connect(self.all)
   action_row=QHBoxLayout(); action_row.setSpacing(10)
   import_button.setMinimumWidth(140); self.ocr_button.setMinimumWidth(180)
@@ -747,31 +747,37 @@ class Window(QMainWindow):
   v.addLayout(footer)
 
   tabs.addTab(page,'Translator')
-  about=QWidget(); av=QVBoxLayout(about); av.addWidget(QLabel('<h2>BlueTL</h2><p>Version v1.0.2</p><p>Published by borneanwingz.fl</p><p>Author: Blue-Wingz @ facedesk</p>')); av.addStretch(); tabs.addTab(about,'About')
+  about=QWidget(); av=QVBoxLayout(about)
+  about_details=QLabel('<h2>BlueTL</h2><p>Version v1.0.2</p><p>Published by borneanwingz.fl</p><p>Author: Blue-Wingz @ facedesk</p><p><a href="https://github.com/BorneanWingz/PrivateRepoReadmes/blob/main/BlueTLReadme.md">Readme</a></p>')
+  about_details.setOpenExternalLinks(True); av.addWidget(about_details)
+  av.addStretch()
+  support=QLabel('If you enjoy my app, please consider to <a href="https://buymeacoffee.com/DrLwSii">buy me a cuppa</a>!')
+  support.setOpenExternalLinks(True); support.setWordWrap(True); av.addWidget(support)
+  tabs.addTab(about,'About')
   w.setStyleSheet('''
-   QWidget { color: #172033; font-family: "Segoe UI"; font-size: 10pt; }
+   QWidget { color: #172033; font-family: "Segoe UI"; font-size: 9pt; }
    QMainWindow { background: #f1f3f7; }
-   QLabel#brandTitle { font-size: 30pt; font-weight: 700; color: #101828; }
-   QLabel#brandSubtitle { font-size: 19pt; color: #667085; padding-top: 8px; }
-   QLabel#connectionBadge { color: #16763a; background: #e4f4e8; border: 1px solid #a7d7b4; border-radius: 12px; padding: 5px 12px; font-weight: 600; }
-   QLabel#cardTitle { font-size: 15pt; font-weight: 700; }
-   QLabel#fieldLabel { color: #475467; font-size: 9pt; font-weight: 600; }
+   QLabel#brandTitle { font-size: 23pt; font-weight: 700; color: #101828; }
+   QLabel#brandSubtitle { font-size: 14pt; color: #667085; padding-top: 5px; }
+   QLabel#connectionBadge { color: #16763a; background: #e4f4e8; border: 1px solid #a7d7b4; border-radius: 15px; padding: 5px 9px; min-height: 30px; font-weight: 600; }
+   QLabel#cardTitle { font-size: 12pt; font-weight: 700; }
+   QLabel#fieldLabel { color: #475467; font-size: 8pt; font-weight: 600; }
    QFrame#connectionCard, QFrame#jobCard { background: #ffffff; border: 1px solid #e1e5eb; border-radius: 12px; }
    QFrame#connectionSummary { background: #ffffff; border: 1px solid #dfe4eb; border-radius: 10px; }
    QTabWidget::pane { border: 0; background: transparent; }
-   QTabBar::tab { background: #e7e9ee; padding: 8px 18px; border-top-left-radius: 6px; border-top-right-radius: 6px; }
+   QTabBar::tab { background: #e7e9ee; padding: 6px 14px; border-top-left-radius: 6px; border-top-right-radius: 6px; }
    QTabBar::tab:selected { background: #ffffff; color: #173b8f; font-weight: 600; border-bottom: 2px solid #2563eb; }
-   QLineEdit, QComboBox { background: #ffffff; border: 1px solid #cbd2dc; border-radius: 6px; padding: 6px 8px; min-height: 22px; }
-   QPushButton { background: #f8f9fb; border: 1px solid #c8ced8; border-radius: 7px; padding: 7px 12px; }
+   QLineEdit, QComboBox { background: #ffffff; border: 1px solid #cbd2dc; border-radius: 6px; padding: 4px 7px; min-height: 20px; }
+   QPushButton { background: #f8f9fb; border: 1px solid #c8ced8; border-radius: 7px; padding: 5px 10px; min-height: 30px; }
    QPushButton:hover { background: #edf1f7; }
    QPushButton:disabled { color: #98a2b3; background: #f4f5f7; }
-   QPushButton#connectAction { color: #ffffff; background: #1fa35b; border: 0; font-weight: 600; min-width: 150px; }
+   QPushButton#connectAction { color: #ffffff; background: #1fa35b; border: 0; font-weight: 600; min-width: 135px; }
    QPushButton#connectAction:hover { background: #16834a; }
-   QPushButton#primaryAction { color: #ffffff; background: #2563eb; border: 0; font-size: 12pt; font-weight: 600; }
+   QPushButton#primaryAction { color: #ffffff; background: #2563eb; border: 0; font-size: 9pt; font-weight: 600; }
    QPushButton#primaryAction:hover { background: #1d4ed8; }
    QTableWidget { background: #ffffff; alternate-background-color: #fafbfc; border: 1px solid #dfe4eb; border-radius: 8px; }
-   QHeaderView::section { background: #f1f3f5; color: #344054; padding: 8px; border: 0; border-bottom: 1px solid #dfe4eb; font-weight: 600; }
-   QTableWidget::item { padding: 5px; border-bottom: 1px dashed #d8dde5; }
+   QHeaderView::section { background: #f1f3f5; color: #344054; padding: 6px; border: 0; border-bottom: 1px solid #dfe4eb; font-weight: 600; }
+   QTableWidget::item { padding: 4px; border-bottom: 1px dashed #d8dde5; }
    QProgressBar { border: 1px solid #d0d5dd; border-radius: 5px; text-align: center; background: #f2f4f7; }
    QProgressBar::chunk { background: #2563eb; border-radius: 4px; }
    QLabel#readyStatus { color: #475467; }
@@ -795,11 +801,11 @@ class Window(QMainWindow):
    detail=f'{model} · {count} model(s)' if model else f'{count} model(s)'
    self.connection_summary_text.setText(f'Connected to {url} · {detail}')
    self.header_connection.setText('● Connected')
-   self.header_connection.setStyleSheet('color:#16763a;background:#e4f4e8;border:1px solid #a7d7b4;border-radius:12px;padding:5px 12px;font-weight:600;')
+   self.header_connection.setStyleSheet('color:#16763a;background:#e4f4e8;border:1px solid #a7d7b4;border-radius:15px;padding:5px 9px;min-height:30px;font-weight:600;')
   else:
    self.connection_summary_text.setText('Connection required. Enter your provider details below.')
    self.header_connection.setText('● Not connected')
-   self.header_connection.setStyleSheet('color:#667085;background:#f2f4f7;border:1px solid #d0d5dd;border-radius:12px;padding:5px 12px;font-weight:600;')
+   self.header_connection.setStyleSheet('color:#667085;background:#f2f4f7;border:1px solid #d0d5dd;border-radius:15px;padding:5px 9px;min-height:30px;font-weight:600;')
  def load(self):
   try:
    # //remarks: Read with an explicit UTF-8 encoding, matching save(): the config is written with
@@ -857,7 +863,7 @@ class Window(QMainWindow):
   # //remarks: the placeholder instead of an empty combo box that looks broken.
   self.refresh_provider_list()
   # //remarks: A config is only "connected" when it already holds both a Base URL and a key, which happens after a
-  # //remarks: previous Save & Connect. Restoring it lets a returning user see their models straight away without
+  # //remarks: previous Save. Restoring it lets a returning user see their models straight away without
   # //remarks: having to confirm again; a fresh or cleared config stays unconfirmed and the dropdown stays locked.
   if self.url.text().strip() and self.key.text().strip():
    self.connected_url=self.url.text().strip(); self.connected_key=self.key.text().strip()
@@ -868,7 +874,7 @@ class Window(QMainWindow):
   # //remarks: Switching the filter on with nothing cached yet is reported honestly instead of leaving the user
   # //remarks: wondering why the dropdown is empty: the models appear once the provider answers.
   if self.free_only.isChecked() and self.model.count()==0 and not self.connected_url:
-   self.status.setText('Enter your Base URL and API key, then press Save & Connect: the model list is fetched from your provider.')
+   self.status.setText('Enter your Base URL and API key, then press Save: the model list is fetched from your provider.')
  def ocr_dependency_hint(self):
   return 'Install or repair dependencies with:\npython -m pip install -r requirements.txt\n\nPython: '+sys.executable
 
@@ -970,10 +976,10 @@ class Window(QMainWindow):
   chosen=str(saved.get('model') or '').strip()
   self.model.setCurrentText(chosen or (self.model.itemText(0) if self.model.count() else ''))
   self.model.blockSignals(False)
-  self.connect_status.setText(f'Loaded {saved["url"]} - press Save & Connect to reconnect.' if self.api_verified!=profile_key(saved['url']) else 'Connecting...')
+  self.connect_status.setText(f'Loaded {saved["url"]} - press Save to reconnect.' if self.api_verified!=profile_key(saved['url']) else 'Connecting...')
   self.connect_status.setStyleSheet('color:#b45309;padding:2px 2px;')
   self.connect_button.setEnabled(True)
-  self.status.setText(f'Provider selected: {saved["url"]}. Press Save & Connect to fetch its model list.')
+  self.status.setText(f'Provider selected: {saved["url"]}. Press Save to fetch its model list.')
  def delete_provider(self):
   # //remarks: Removes the saved provider matching the Base URL on screen. If it is the active connection the fields,
   # //remarks: model list and verified state are cleared too, so nothing of the deleted provider remains in use.
@@ -990,7 +996,7 @@ class Window(QMainWindow):
   self.connected_url=''; self.connected_key=''; self.refreshed=''; self.model_cache=[]
   self.model.blockSignals(True); self.set_models([],keep_current=False); self.model.setCurrentText(''); self.model.blockSignals(False)
   self.model.setEnabled(False); self.set_refresh_enabled(False); self.connect_button.setEnabled(True)
-  self.connect_status.setText('Not confirmed - press Save & Connect to load models.'); self.connect_status.setStyleSheet('color:#b45309;padding:2px 2px;')
+  self.connect_status.setText('Not confirmed - press Save to load models.'); self.connect_status.setStyleSheet('color:#b45309;padding:2px 2px;')
   self.refresh_provider_list()
   try: self.save()
   except Exception as e: self.status.setText(f'Could not save settings: {e}'); return
@@ -1023,7 +1029,7 @@ class Window(QMainWindow):
    if entry.get('verified') and self.api_verified==profile_key(url): self.connected_url=url; self.connected_key=self.key.text().strip(); self.apply_connection_state()
    return
   # //remarks: An unknown URL is a fresh provider: nothing from the previous one survives, and the dropdown is locked
-  # //remarks: until Save & Connect proves the new connection.
+  # //remarks: until Save proves the new connection.
   if self.model_cache or self.model.count():
    self.model_cache=[]
    self.model.blockSignals(True); self.set_models([],keep_current=False); self.model.setCurrentText(''); self.model.blockSignals(False)
@@ -1064,7 +1070,7 @@ class Window(QMainWindow):
   if checked and not any(is_free_model(m) for m in self.model_cache): QMessageBox.information(self,'Free models','No free models detected.')
  def on_connection_edited(self):
   # //remarks: The user changed a connection field after confirming (or before doing so). No request is sent:
-  # //remarks: the previous confirmation no longer describes what is on screen, so Save & Connect is re-enabled,
+  # //remarks: the previous confirmation no longer describes what is on screen, so Save is re-enabled,
   # //remarks: Refresh is disabled, and the model dropdown is locked until the new values are confirmed. Editing only
   # //remarks: the key keeps the cached list, because the same provider simply needs a new key; editing the Base URL
   # //remarks: is handled by on_url_changed, which clears or restores the list for whichever provider is now in the
@@ -1076,7 +1082,7 @@ class Window(QMainWindow):
    return
   self.refresh_provider_list()
   self.connect_button.setEnabled(True)
-  self.connect_status.setText('Not confirmed - press Save & Connect to reload models.')
+  self.connect_status.setText('Not confirmed - press Save to reload models.')
   self.connect_status.setStyleSheet('color:#b45309;padding:2px 2px;')
   self.model.setEnabled(False); self.set_refresh_enabled(False)
   self.update_connection_summary()
@@ -1107,7 +1113,7 @@ class Window(QMainWindow):
    self.set_connection_editor_visible(False)
   else:
    self.connect_button.setEnabled(True)
-   self.connect_status.setText('Not confirmed - press Save & Connect to load models.')
+   self.connect_status.setText('Not confirmed - press Save to load models.')
    self.connect_status.setStyleSheet('color:#b45309;padding:2px 2px;')
    self.model.setEnabled(False); self.set_refresh_enabled(False)
  def confirm_connection(self):
@@ -1149,11 +1155,11 @@ class Window(QMainWindow):
   # //remarks: automatic refresh stays silent and simply keeps the current list - OCR and translation are never
   # //remarks: affected by discovery.
   # //remarks: Refresh only ever acts on a CONFIRMED connection. Without one there is nothing trustworthy to ask:
-  # //remarks: the user must press Save & Connect first, which is the Cline-style step this app mirrors.
+  # //remarks: the user must press Save first, which is the Cline-style step this app mirrors.
   if url is None: url=normalized_url(self.connected_url or self.url.text())
   if key is None: key=self.connected_key or self.key.text().strip()
   if not url:
-   if manual: QMessageBox.warning(self,'Base URL required','Enter the OpenAI-compatible Base URL first, then press Save & Connect.')
+   if manual: QMessageBox.warning(self,'Base URL required','Enter the OpenAI-compatible Base URL first, then press Save.')
    return
   # //remarks: The Base URL field is deliberately NOT rewritten here: normalized_url only shapes the request URL
   # //remarks: for discovery, and the translation client must keep receiving exactly the text the tester typed.
@@ -1172,7 +1178,7 @@ class Window(QMainWindow):
   # //remarks: for example before the key was pasted - does not block the automatic retry that the next edit
   # //remarks: schedules for the same URL.
   self.model_refreshing=True; self.model_manual=manual; self.model_pending=''
-  # //remarks: Only the explicit Save & Connect press proves the key; an automatic or Refresh-button fetch reuses the
+  # //remarks: Only the explicit Save press proves the key; an automatic or Refresh-button fetch reuses the
   # //remarks: verification that already exists, so a background refresh never spends a completion or fails a working
   # //remarks: connection just because the provider is briefly busy.
   self.model_verify=verify_key; self.model_key=key; self.model_check=verify_key
@@ -1199,7 +1205,7 @@ class Window(QMainWindow):
   if manual: self.set_refresh_enabled(True)
   if loader.is_alive():
    if manual: self.status.setText(f'Model list request timed out after 30 seconds ({url}). The current list is kept.')
-   self.connect_status.setText('Connection timed out - check the Base URL and press Save & Connect again.')
+   self.connect_status.setText('Connection timed out - check the Base URL and press Save again.')
    self.connect_status.setStyleSheet('color:#c62828;padding:2px 2px;')
    self.connect_button.setEnabled(True); self.model.setEnabled(False); self.set_refresh_enabled(False)
   elif loader.list_error:
@@ -1208,7 +1214,7 @@ class Window(QMainWindow):
    kept=' The current list is kept.' if self.model_cache else ' No model list is loaded for this provider yet.'
    if manual: self.status.setText(f'Model list could not be fetched ({loader.list_error}).{kept}')
    # //remarks: A rejected key or a wrong path leaves the connection unconfirmed and names the reason in the
-   # //remarks: connect line, so the user fixes the field and presses Save & Connect again.
+   # //remarks: connect line, so the user fixes the field and presses Save again.
    self.connect_status.setText(f'Connection failed - {loader.list_error}')
    self.connect_status.setStyleSheet('color:#c62828;padding:2px 2px;')
    self.connect_button.setEnabled(True); self.model.setEnabled(False); self.set_refresh_enabled(False)
@@ -1238,7 +1244,7 @@ class Window(QMainWindow):
     days=tls_certificate_expiry(url)
     self.cert_days=days
     expiry=f' Certificate valid for {days} more day(s).' if isinstance(days,int) and days>=0 else ''
-    # //remarks: The key check runs inside this same step, so Save & Connect is one action that both loads the list
+    # //remarks: The key check runs inside this same step, so Save is one action that both loads the list
     # //remarks: and proves the key. It is skipped for a background or Refresh-button fetch, which keeps whatever
     # //remarks: verification already exists: a refresh must never spend a request or revoke a working connection.
     if self.model_check and self.model_key:
@@ -1254,7 +1260,7 @@ class Window(QMainWindow):
      self.api_verified=''
      self.set_api_status(False,detail)
      self.status.setText(f'{len(self.model_cache)} model(s) fetched from {source}, but the API key was rejected: {detail}')
-     if manual: QMessageBox.warning(self,'API key not verified',f'The model list was fetched from {source}, but testing the API key failed:\n\n{detail}\n\nCheck the key and press Save & Connect again.')
+     if manual: QMessageBox.warning(self,'API key not verified',f'The model list was fetched from {source}, but testing the API key failed:\n\n{detail}\n\nCheck the key and press Save again.')
     self.save()
    elif manual:
     # //remarks: An empty but valid answer means the provider genuinely published no models; the current
@@ -1276,7 +1282,7 @@ class Window(QMainWindow):
  def verify_api_key(self,url,key,models=None,timeout=10):
   # //remarks: Prove the key through the real chat endpoint. Some hosts serve /models to anyone, so a model list
   # //remarks: cannot double as a key check; one minimal completion can, and it is also what the user's own
-  # //remarks: translations will do. Returns (ok, message, model) and never raises: Save & Connect must keep going
+  # //remarks: translations will do. Returns (ok, message, model) and never raises: Save must keep going
   # //remarks: with a clear reason instead of dying on a provider error.
   model=self.probe_model(models if models is not None else self.model_cache)
   if not model: return False,'No model is available to test the API key with; press Test API and choose a model.',''
@@ -1312,7 +1318,7 @@ class Window(QMainWindow):
   colour='#1a7f37' if ok else ('#c62828' if ok is False else '#6b7280')
   background='#e7f5eb' if ok else ('#fdecec' if ok is False else '#f2f4f7')
   border='#b7dfc1' if ok else ('#f2b8b5' if ok is False else '#d0d5dd')
-  self.api_status.setText(text); self.api_status.setStyleSheet(f'color:{colour};background:{background};border:1px solid {border};border-radius:11px;font-weight:600;padding:4px 9px;')
+  self.api_status.setText(text); self.api_status.setStyleSheet(f'color:{colour};background:{background};border:1px solid {border};border-radius:15px;font-weight:600;padding:5px 8px;min-height:30px;')
   self.api_status.setToolTip(detail or 'Run Test API, or use Translate all to verify automatically.')
  def set_image_status(self,ok,detail=''):
   # //remarks: None=no images, True=images/archive expanded, False=import produced no usable images.
@@ -1320,7 +1326,7 @@ class Window(QMainWindow):
   colour='#1a7f37' if ok else ('#c62828' if ok is False else '#6b7280')
   background='#e7f5eb' if ok else ('#fdecec' if ok is False else '#f2f4f7')
   border='#b7dfc1' if ok else ('#f2b8b5' if ok is False else '#d0d5dd')
-  self.image_status.setText(text); self.image_status.setStyleSheet(f'color:{colour};background:{background};border:1px solid {border};border-radius:11px;font-weight:600;padding:4px 9px;')
+  self.image_status.setText(text); self.image_status.setStyleSheet(f'color:{colour};background:{background};border:1px solid {border};border-radius:15px;font-weight:600;padding:5px 8px;min-height:30px;')
   self.image_status.setToolTip(detail)
  def update_actions(self):
   # //remarks: Single place that decides whether a manually typed row is possible. It stays disabled until
@@ -1638,12 +1644,12 @@ class Window(QMainWindow):
   # //remarks: Enforce the same confirmation gate the UI shows. A request must never be sent from an unconfirmed
   # //remarks: draft, otherwise a half-typed Base URL would reach the network behind the user's back.
   if not self.same_connection(self.url.text().strip(),self.key.text().strip()):
-   QMessageBox.warning(self,'Connection not confirmed','Enter the Base URL and API key, then press Save & Connect to load the model list.')
+   QMessageBox.warning(self,'Connection not confirmed','Enter the Base URL and API key, then press Save to load the model list.')
    return None
   # //remarks: A confirmed connection is not enough: the key must also have been proved, because a provider whose
   # //remarks: /models endpoint is public would otherwise let an invalid key look ready and fail on the first row.
   if profile_key(self.url.text().strip())!=self.api_verified:
-   QMessageBox.warning(self,'API key not verified','The model list is loaded, but the API key has not been verified yet. Press Test API to check it, or press Save & Connect again.')
+   QMessageBox.warning(self,'API key not verified','The model list is loaded, but the API key has not been verified yet. Press Test API to check it, or press Save again.')
    return None
   if not self.url.text() or not self.key.text() or not self.model.currentText(): QMessageBox.warning(self,'API settings required','Enter Base URL, API key, and model name.'); return None
   self.save(); return OpenAI(base_url=self.url.text().rstrip('/'),api_key=self.key.text())
@@ -1665,9 +1671,9 @@ class Window(QMainWindow):
   # //remarks: Validation happens before any client is built: the key check is the very action that unlocks the Model
   # //remarks: dropdown, so it must be reachable on a freshly fetched list that has not been proved yet.
   if not url or not key:
-   QMessageBox.warning(self,'Connection details required','Enter the Base URL and API key, then press Save & Connect.'); return
+   QMessageBox.warning(self,'Connection details required','Enter the Base URL and API key, then press Save.'); return
   if not self.same_connection(url,key):
-   QMessageBox.warning(self,'Connection not confirmed','Press Save & Connect first: the model list must be loaded before the API key can be tested.'); return
+   QMessageBox.warning(self,'Connection not confirmed','Press Save first: the model list must be loaded before the API key can be tested.'); return
   c=OpenAI(base_url=url.rstrip('/'),api_key=key)
   last=None
   for model in self.candidates():
@@ -1679,7 +1685,7 @@ class Window(QMainWindow):
     self.end_progress('API test succeeded.')
     # //remarks: A successful probe flips the API pill to a green tick, records which model answered, and remembers
     # //remarks: this provider as one whose key works - that is what lets the user come back to it later and what
-    # //remarks: unlocks the Model dropdown after Save & Connect.
+    # //remarks: unlocks the Model dropdown after Save.
     self.set_api_status(True,f'Verified with model: {model}')
     self.last_model=model
     self.api_verified=profile_key(url)

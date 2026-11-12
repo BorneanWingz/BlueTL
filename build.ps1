@@ -3,6 +3,8 @@ py -3.14 -m pip install --upgrade pip
 py -3.14 -m pip install -r requirements.txt
 $icon = Join-Path $PSScriptRoot 'assets\bluetl.png'
 if (!(Test-Path $icon)) { throw "Missing icon: $icon" }
+$versionInfo = Join-Path $PSScriptRoot 'version_info.txt'
+if (!(Test-Path $versionInfo)) { throw "Missing Windows version information: $versionInfo" }
 $ocrModel = Join-Path $PSScriptRoot 'assets\manga-ocr-model'
 if (!(Test-Path (Join-Path $ocrModel 'vocab.txt'))) { throw "Missing Manga OCR model: $ocrModel" }
 # //remarks: Text detection runs on the vendored comic_text_detector package (see its VENDOR.md), so a
@@ -32,7 +34,7 @@ if (!(Test-Path (Join-Path $ctdModel 'comictextdetector.pt'))) { throw "Missing 
 # //remarks: --collect-submodules psd_tools bundles the PSD compositing helpers: app.py imports psd_tools lazily
 # //remarks: inside flatten_psd, so static analysis alone would miss its compression/adjustment submodules and
 # //remarks: a .psd page would then fail to flatten inside the frozen EXE.
-py -3.14 -m PyInstaller --noconfirm --clean --windowed --noupx --hidden-import unicodedata --collect-data unidic_lite --collect-data manga_ocr --collect-submodules comic_text_detector --collect-all psd_tools --collect-all transformers --collect-all torchvision --icon $icon --add-data "$icon;assets" --add-data "$ocrModel;assets\manga-ocr-model" --add-data "$ctdModel;assets\comic-text-detector-model" --name BlueTL app.py
+py -3.14 -m PyInstaller --noconfirm --clean --windowed --noupx --hidden-import unicodedata --collect-data unidic_lite --collect-data manga_ocr --collect-submodules comic_text_detector --collect-all psd_tools --collect-all transformers --collect-all torchvision --icon $icon --version-file $versionInfo --add-data "$icon;assets" --add-data "$ocrModel;assets\manga-ocr-model" --add-data "$ctdModel;assets\comic-text-detector-model" --name BlueTL app.py
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE" }
 # //remarks: Fail the build loudly if the unidic dictionary data is missing, so a broken
 # //remarks: OCR bundle can never be shipped again (this was the cause of the OCR failure).
