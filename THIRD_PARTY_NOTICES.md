@@ -40,3 +40,6 @@ manga-image-translator is GPL-3.0 and the release page states no separate licens
 they are treated as covered by that project's terms. The upstream README documents that the detector
 was trained on Manga109-s (© the individual authors), DCM and synthetic data; that notice is carried
 over here. BlueTL bundles no training data or fonts.
+## Archive libraries
+
+7Z archives are read with **py7zr** (LGPL-2.1-or-later), an unmodified dependency installed from PyPI; it also pulls in pybcj and pyppmd as its codec backends. RAR archives are read with **rarfile** (ISC), which requires an external unrar or WinRAR binary supplied by the user. ZIP archives use the Python standard library.

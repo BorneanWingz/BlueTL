@@ -1,4 +1,4 @@
-import sys, json, os, re, base64, ctypes, shutil, tempfile, zipfile, time, threading, socket, ssl, urllib.request, urllib.error, urllib.parse
+import sys, json, os, re, base64, ctypes, shutil, tempfile, zipfile, time, threading, socket, ssl, urllib.request, urllib.error, urllib.parse, webbrowser
 from pathlib import Path
 
 os.environ.setdefault('HF_HUB_OFFLINE','1')
@@ -60,6 +60,41 @@ PROVIDER_VERIFIED=chr(0x2714)+' '
 PROVIDER_UNVERIFIED=chr(0x2014)+' '
 # //remarks: One wording for the certificate note, so the status tooltip and the fetch message cannot drift apart.
 CERT_NOTE='The provider certificate is valid for {days} more day(s).'
+# //remarks: One wording for the certificate note, so the status tooltip and the fetch message cannot drift apart.
+CERT_NOTE='The provider certificate is valid for {days} more day(s).'
+# //remarks: Update gate. The About label and the startup version check both read APP_VERSION, so a release
+# //remarks: cannot disagree with itself about its own number. The check fetches the repository's release tags
+# //remarks: once at startup and compares them with the running version: a build that is at most
+# //remarks: MAX_SKIPPED_VERSIONS releases behind may keep running (the user can hold the update), but a build
+# //remarks: that is further behind is obsolete and refuses to start. The user is never nagged twice in one
+# //remarks: launch, and a failed or offline check must never block the app - it simply skips the reminder.
+APP_VERSION='1.0.4'
+RELEASES_URL='https://api.github.com/repos/BorneanWingz/BlueTL/releases?per_page=30'
+RELEASE_PAGE_URL='https://github.com/BorneanWingz/BlueTL/releases/tag/{tag}'
+MAX_SKIPPED_VERSIONS=2
+
+def parse_version(value):
+ # //remarks: Turn a tag like "v1.0.10" into a comparable tuple (1,0,10), so string sorting cannot rank
+ # //remarks: v1.0.10 before v1.0.2. Leading "v"/"V" is stripped, numeric segments are kept until the first
+ # //remarks: non-numeric one (suffixes such as "-beta" end the number), and anything unparseable is (0,).
+ text=str(value or '').strip().lstrip('vV')
+ parts=[]
+ for chunk in re.split(r'[._-]',text):
+  if chunk.isdigit(): parts.append(int(chunk))
+  elif parts: break
+ return tuple(parts)
+
+def newer_releases(current,tags):
+ # //remarks: Return the release tags strictly newer than the running version, newest first. Duplicates and
+ # //remarks: empty tags are dropped, so a badly written release entry cannot create a phantom reminder.
+ current=parse_version(current)
+ seen=set(); out=[]
+ for tag in tags:
+  tag=str(tag or '').strip()
+  if not tag or tag in seen or parse_version(tag)<=current: continue
+  seen.add(tag); out.append(tag)
+ out.sort(key=parse_version,reverse=True)
+ return out
 
 def is_free_model(model_id):
  # //remarks: Single definition of "free" so the dropdown filter and the retry order can never disagree.
@@ -283,6 +318,21 @@ def model_list_urls(base_url):
  match=re.match(r'^(.*)/v\d+(?:\.\d+)?$',base,re.I)
  if match and match.group(1): urls.append(match.group(1))
  return urls
+class ReleaseLoader(threading.Thread):
+ # //remarks: Startup version check. The GitHub API is contacted once on a daemon thread, so a slow or
+ # //remarks: offline network can never delay the window; poll_latest_release() collects the result from a
+ # //remarks: timer on the GUI thread. Any failure (HTTP error, bad JSON, offline) reports as an empty tag
+ # //remarks: list with the error kept for diagnostics, and the caller simply skips the reminder.
+ def __init__(self,url=RELEASES_URL,timeout=8):
+  super().__init__(daemon=True); self.url=url; self.timeout=timeout
+  self.tags=[]; self.error=None
+ def run(self):
+  try:
+   req=urllib.request.Request(self.url,headers={'Accept':'application/vnd.github+json','User-Agent':'BlueTL-update-check'})
+   with urllib.request.urlopen(req,timeout=self.timeout) as resp: body=json.loads(resp.read().decode('utf-8','replace'))
+   releases=body if isinstance(body,list) else []
+   self.tags=[str((r or {}).get('tag_name') or '').strip() for r in releases if isinstance(r,dict)]
+  except Exception as e: self.error=e
 
 class ModelListLoader(threading.Thread):
  def __init__(self,base_url,api_key):
@@ -387,6 +437,25 @@ def _text_mask(img):
 # //remarks: Cached detector instance. Loading the weights takes about a second and they are ~76 MB, so the
 # //remarks: detector is built on first use and reused for every page of the batch.
 _DETECTOR=None
+def release_ocr_models():
+  # //remarks: OCR is a batch operation, but the detector and Manga OCR stay resident for the whole session
+  # //remarks: unless they are dropped: torch alone costs ~200 MB and the loaded detector another ~300 MB, so
+  # //remarks: a user who recognises one chapter then just reads the table keeps paying for models they are no
+  # //remarks: longer using. Called when a batch ends, so the next batch pays the ~1 s reload instead of the app
+  # //remarks: holding half a gigabyte while idle.
+  global _DETECTOR
+  _DETECTOR=None
+  # //remarks: torch caches its allocations and keeps worker threads alive, so dropping the Python reference
+  # //remarks: alone does not return the memory. empty_cache() frees the cached blocks on CUDA builds, and
+  # //remarks: gc.collect() drops the model graph on CPU builds where the reference is the only owner.
+  try:
+   import torch
+   if torch.cuda.is_available(): torch.cuda.empty_cache()
+  except Exception: pass
+  try:
+   import gc
+   gc.collect()
+  except Exception: pass
 def text_detector():
   # //remarks: Built lazily so importing app.py stays fast and a machine without the detector installed only
   # //remarks: fails when OCR is actually requested.
@@ -399,6 +468,12 @@ def text_detector():
    import torch
    # //remarks: Same device policy as MangaOcr: use the GPU when torch can see one, otherwise the CPU.
    device='cuda' if torch.cuda.is_available() else 'cpu'
+   # //remarks: Cap the CPU thread pool. Torch defaults to one thread per core, and each thread keeps its own
+   # //remarks: allocation arena, which is a large part of the ~200 MB jump seen when torch is first imported.
+   # //remarks: OCR here is one small page at a time, so four threads lose almost no speed and save memory.
+   try: torch.set_num_threads(min(4,os.cpu_count() or 1))
+   except Exception: pass
+
    # //remarks: input_size=1024 with act='leaky' are the settings this checkpoint is used with in mokuro.
    _DETECTOR=TextDetector(model_path=str(model),input_size=1024,device=device,act='leaky')
   return _DETECTOR
@@ -459,7 +534,13 @@ def _text_crops(img):
 # //remarks: flattened. It ships prebuilt Windows wheels, so the frozen build needs no compiler. The composited
 # //remarks: page is cached as a PNG so the same file is only flattened once per run.
 PSD_SUFFIXES=('.psd',)
-
+# //remarks: One definition of what Import accepts, shared by the file dialog, the folder scan and the
+# //remarks: archive extraction, so the three paths can never drift apart and accept different files.
+IMAGE_SUFFIXES=('.jpg','.jpeg','.png','.webp','.psd')
+# //remarks: 7z is read with py7zr, ZIP with the standard library and RAR with rarfile. RAR still needs an
+# //remarks: external unrar/WinRAR binary, which rarfile reports clearly when it is missing.
+ARCHIVE_SUFFIXES=('.zip','.rar','.7z')
+IMPORT_SUFFIXES=IMAGE_SUFFIXES+ARCHIVE_SUFFIXES
 def is_psd(path):
  # //remarks: Extension check only; the real content check is PSDImage.open, which raises on anything else.
  return Path(path).suffix.lower() in PSD_SUFFIXES
@@ -720,10 +801,10 @@ class Window(QMainWindow):
   job.addLayout(action_row)
 
   self.test_api_button=QPushButton('Test API'); self.test_api_button.clicked.connect(self.test_api)
-  self.export_txt_button=QPushButton('Export TXT'); self.export_txt_button.clicked.connect(self.txt)
-  self.export_docx_button=QPushButton('Export DOCX'); self.export_docx_button.clicked.connect(self.docx)
+  self.export_button=QPushButton('Export'); self.export_button.clicked.connect(self.export)
+  self.export_button.setToolTip('Export the translation table. Choose TXT, DOCX, or PDF in the dialog that opens.')
   utility_row=QHBoxLayout(); utility_row.addStretch()
-  for button in (self.test_api_button,self.export_txt_button,self.export_docx_button,self.add_button,self.delete_button):
+  for button in (self.test_api_button,self.export_button,self.add_button,self.delete_button):
    utility_row.addWidget(button)
   job.addLayout(utility_row); v.addWidget(self.job_card)
 
@@ -748,7 +829,7 @@ class Window(QMainWindow):
 
   tabs.addTab(page,'Translator')
   about=QWidget(); av=QVBoxLayout(about)
-  about_details=QLabel('<h2>BlueTL</h2><p>Version v1.0.2</p><p>Published by borneanwingz.fl</p><p>Author: Blue-Wingz @ facedesk</p><p><a href="https://github.com/BorneanWingz/PrivateRepoReadmes/blob/main/BlueTLReadme.md">Readme</a></p>')
+  about_details=QLabel(f'<h2>BlueTL</h2><p>Version v{APP_VERSION}</p><p>Published by borneanwingz.fl</p><p>Author: Blue-Wingz @ facedesk</p><p><a href="https://github.com/BorneanWingz/PrivateRepoReadmes/blob/main/BlueTLReadme.md">Readme</a></p>')
   about_details.setOpenExternalLinks(True); av.addWidget(about_details)
   av.addStretch()
   support=QLabel('If you enjoy my app, please consider to <a href="https://buymeacoffee.com/DrLwSii">buy me a cuppa</a>!')
@@ -778,6 +859,10 @@ class Window(QMainWindow):
    QTableWidget { background: #ffffff; alternate-background-color: #fafbfc; border: 1px solid #dfe4eb; border-radius: 8px; }
    QHeaderView::section { background: #f1f3f5; color: #344054; padding: 6px; border: 0; border-bottom: 1px solid #dfe4eb; font-weight: 600; }
    QTableWidget::item { padding: 4px; border-bottom: 1px dashed #d8dde5; }
+   QTableWidget::item:selected { background: #dbeafe; color: #101828; }
+   QTableWidget::item:selected:active { background: #dbeafe; color: #101828; }
+   QTableWidget::item:selected:!active { background: #e8f0fe; color: #101828; }
+   QTableWidget QLineEdit { background: #ffffff; color: #101828; border: 1px solid #2563eb; border-radius: 3px; padding: 1px 3px; }
    QProgressBar { border: 1px solid #d0d5dd; border-radius: 5px; text-align: center; background: #f2f4f7; }
    QProgressBar::chunk { background: #2563eb; border-radius: 4px; }
    QLabel#readyStatus { color: #475467; }
@@ -875,6 +960,61 @@ class Window(QMainWindow):
   # //remarks: wondering why the dropdown is empty: the models appear once the provider answers.
   if self.free_only.isChecked() and self.model.count()==0 and not self.connected_url:
    self.status.setText('Enter your Base URL and API key, then press Save: the model list is fetched from your provider.')
+  # //remarks: Start the update check last, so the window is already built and painted before any network work
+  # //remarks: begins. A source run (python app.py) is checked too: the gate is about the version number, not
+  # //remarks: about being frozen, and skipping it in source would leave the rule untested until release day.
+  self.start_update_check()
+ def start_update_check(self):
+  # //remarks: One request per application launch, not one per Window. Tests and future auxiliary windows can
+  # //remarks: create several Window instances, but the release endpoint must still receive only one request.
+  if getattr(Window,'_update_check_started',False): return
+  Window._update_check_started=True
+  # //remarks: One request per launch, on a daemon thread, collected by a timer on the GUI thread - the same
+  # //remarks: pattern model discovery uses. Nothing here may block or fail the window: an offline PC simply
+  # //remarks: gets no reminder, because a network problem is not the user's fault and must never lock them out.
+  self.release_loader=None; self.update_notified=False; self.obsolete=False
+  self.update_poll=QTimer(self); self.update_poll.setInterval(250)
+  self.update_poll.timeout.connect(self.poll_latest_release)
+  self.release_loader=ReleaseLoader(); self.release_loader.start()
+  self.update_poll.start()
+ def poll_latest_release(self):
+  # //remarks: Finish the startup check once the worker has answered, then stop the timer so the window is not
+  # //remarks: polled for the rest of the session. Exactly one dialog is ever shown per launch.
+  loader=self.release_loader
+  if loader is None: self.update_poll.stop(); return
+  if loader.is_alive(): return
+  self.update_poll.stop(); self.release_loader=None
+  if self.update_notified or not loader.tags: return
+  self.update_notified=True
+  self.enforce_update_gate(loader.tags)
+ def enforce_update_gate(self,tags):
+  # //remarks: The update policy in one place. A build up to MAX_SKIPPED_VERSIONS releases behind may be kept -
+  # //remarks: the user is told which versions exist and can carry on working. Further behind than that the
+  # //remarks: executable is obsolete: it is refused outright, because a stale build may talk to a provider API
+  # //remarks: that has since changed, and supporting several old versions is not something the app can do.
+  newer=newer_releases(APP_VERSION,tags)
+  if not newer: return
+  behind=len(newer)
+  latest=newer[0]
+  if behind<=MAX_SKIPPED_VERSIONS:
+   QMessageBox.information(self,'Update available',
+    f'BlueTL v{APP_VERSION} is {behind} version(s) behind. The newest release is {latest}.\n\n'
+    f'You can keep using this version for now. After {MAX_SKIPPED_VERSIONS} skipped updates the '
+    f'executable stops working until it is replaced, so please download {latest} soon.')
+   return
+  QMessageBox.critical(self,'This BlueTL build is obsolete',
+   f'BlueTL v{APP_VERSION} is {behind} versions behind. The newest release is {latest}.\n\n'
+   f'Builds more than {MAX_SKIPPED_VERSIONS} versions old are no longer supported and will not run. '
+   f'After you dismiss this message, the {latest} download page will open in your default browser.')
+  release_url=RELEASE_PAGE_URL.format(tag=urllib.parse.quote(latest,safe=''))
+  try:
+   try: opened=webbrowser.open(release_url,new=2)
+   except (webbrowser.Error,OSError): opened=False
+   if not opened:
+    QMessageBox.warning(self,'Could not open browser',f'Open this page manually to download the update:\n{release_url}')
+  finally:
+   self.obsolete=True
+   self.close()
  def ocr_dependency_hint(self):
   return 'Install or repair dependencies with:\npython -m pip install -r requirements.txt\n\nPython: '+sys.executable
 
@@ -924,6 +1064,7 @@ class Window(QMainWindow):
   # //remarks: window that is already closing, and a live timer can keep the process alive, so both are stopped
   # //remarks: as part of shutdown.
   self.model_timer.stop(); self.model_poll.stop()
+  if hasattr(self,'update_poll'): self.update_poll.stop()
   try: self.save()
   except Exception as e: self.status.setText(f'Could not save settings: {e}')
   event.accept()
@@ -1067,7 +1208,15 @@ class Window(QMainWindow):
   if checked: self.status.setText(f'Free models only: showing {count} model(s) whose ID contains "{FREE_MODEL_TOKEN}".')
   else: self.status.setText(f'Free models only off: showing {count} model(s) from the fetched list.')
   self.save()
-  if checked and not any(is_free_model(m) for m in self.model_cache): QMessageBox.information(self,'Free models','No free models detected.')
+  if checked and not any(is_free_model(m) for m in self.model_cache):
+   # //remarks: The filter matched nothing, so leaving the box ticked would show an empty dropdown with no
+   # //remarks: way to see the provider's models. Untick it after telling the user, which restores the full
+   # //remarks: list. blockSignals stops the untick from re-entering this handler and saving twice.
+   QMessageBox.information(self,'Free models','No free models detected.')
+   self.free_only.blockSignals(True); self.free_only.setChecked(False); self.free_only.blockSignals(False)
+   self.set_models(self.model_cache)
+   self.status.setText(f'Free models only off: no model ID contains "{FREE_MODEL_TOKEN}". Showing {self.model.count()} model(s) from the fetched list.')
+   self.save()
  def on_connection_edited(self):
   # //remarks: The user changed a connection field after confirming (or before doing so). No request is sent:
   # //remarks: the previous confirmation no longer describes what is on screen, so Save is re-enabled,
@@ -1363,15 +1512,34 @@ class Window(QMainWindow):
    path=parent
   return ''
 
+ def scan_folder(self,folder):
+  # //remarks: Recursively collect every importable file from a chosen folder. The result goes through the
+  # //remarks: same expand_inputs() path as a hand-picked selection, so name ordering, archive extraction and
+  # //remarks: PSD flattening behave identically however the files arrived.
+  root=Path(folder)
+  return [str(p) for p in sorted(root.rglob('*'),key=lambda x:_name_key(str(x.relative_to(root)))) if p.is_file() and p.suffix.lower() in IMPORT_SUFFIXES]
  def images(self):
   # //remarks: Pass the remembered folder as the dialog's starting directory and remember the folder of the
   # //remarks: selection immediately, so the next import reopens where the user left off.
-  selected,_=QFileDialog.getOpenFileNames(self,'Select manga images or archives',self.dialog_dir(),'Manga files (*.jpg *.jpeg *.png *.webp *.psd *.zip *.rar)')
-  if not selected:return
-  # //remarks: Remember the folder of the last imported file, not the first one. A selection can span several
-  # //remarks: folders (for example a chapter and its archive in another directory) and the last file is the
-  # //remarks: one the user worked with most recently.
-  self.last_dir=str(Path(selected[-1]).parent)
+  # //remarks: A whole folder can be imported too: a chapter is usually one directory of images, and picking
+  # //remarks: every file by hand is the slowest part of a batch. The folder is scanned recursively, so a
+  # //remarks: parent directory holding one sub-folder per chapter also works.
+  selected,_=QFileDialog.getOpenFileNames(self,'Select manga images, archives or a folder',self.dialog_dir(),'Manga files (*.jpg *.jpeg *.png *.webp *.psd *.zip *.rar *.7z);;All files (*)')
+  if not selected:
+   # //remarks: The file dialog cannot return a folder, so a folder import is a separate, explicit choice.
+   # //remarks: It is offered only after the file dialog is cancelled, which leaves the common path unchanged.
+   folder=QFileDialog.getExistingDirectory(self,'Select a folder of manga images or archives',self.dialog_dir())
+   if not folder: return
+   selected=self.scan_folder(folder)
+   if not selected:
+    QMessageBox.information(self,'Nothing to import',f'No JPG, JPEG, PNG, WebP, PSD, ZIP, RAR, or 7Z files were found in:\n{folder}')
+    return
+   self.last_dir=folder
+  else:
+   # //remarks: Remember the folder of the last imported file, not the first one. A selection can span several
+   # //remarks: folders (for example a chapter and its archive in another directory) and the last file is the
+   # //remarks: one the user worked with most recently.
+   self.last_dir=str(Path(selected[-1]).parent)
   # //remarks: Persist at once so the remembered folder survives an abrupt exit, and never let an unwritable
   # //remarks: settings file abort the import.
   note=''
@@ -1394,14 +1562,14 @@ class Window(QMainWindow):
    self.status.setText(f'Imported {len(self.paths)} image(s) in file-name order ({span}). Click Translate all to OCR and translate.{note}')
   else:
    self.set_image_status(False,'No supported images were found in the selected files or archives.')
-   self.status.setText(f'Import produced no usable images. Choose JPG, JPEG, PNG, WebP, PSD, ZIP, or RAR files.{note}')
+   self.status.setText(f'Import produced no usable images. Choose JPG, JPEG, PNG, WebP, PSD, ZIP, RAR, or 7Z files, or a folder containing them.{note}')
  def expand_inputs(self,items):
   # //remarks: Order is taken from the file names, not from the order the file dialog happened to
   # //remarks: return the selection, so the same set of images always becomes page 1..N in name order.
   out=[]; root=Path(tempfile.mkdtemp(prefix='bluetl_'))
   for item in sorted(items,key=lambda x:_name_key(Path(x).name)):
    p=Path(item); suffix=p.suffix.lower()
-   if suffix in ('.jpg','.jpeg','.png','.webp','.psd'): out.append(str(p)); continue
+   if suffix in IMAGE_SUFFIXES: out.append(str(p)); continue
    dest=root/p.stem; dest.mkdir(parents=True,exist_ok=True)
    try:
     if suffix=='.zip':
@@ -1412,10 +1580,19 @@ class Window(QMainWindow):
     elif suffix=='.rar':
      import rarfile
      with rarfile.RarFile(p) as archive: archive.extractall(dest)
+    elif suffix=='.7z':
+     # //remarks: py7zr extracts to a directory. Each member is resolved first so a crafted archive
+     # //remarks: cannot write outside the temporary folder (the same guard the ZIP branch applies).
+     import py7zr
+     with py7zr.SevenZipFile(p) as archive:
+      for name in archive.getnames():
+       target=(dest/name).resolve()
+       if not str(target).startswith(str(dest.resolve())): raise ValueError(f'unsafe path in archive: {name}')
+      archive.extractall(dest)
     else: continue
     # //remarks: Same natural name order inside an archive, applied to the relative path so images
     # //remarks: stay grouped by their folder (for example one folder per chapter).
-    out.extend(str(x) for x in sorted(dest.rglob('*'),key=_name_key) if x.is_file() and x.suffix.lower() in ('.jpg','.jpeg','.png','.webp','.psd'))
+    out.extend(str(x) for x in sorted(dest.rglob('*'),key=_name_key) if x.is_file() and x.suffix.lower() in IMAGE_SUFFIXES)
    except Exception as e:
     QMessageBox.warning(self,'Archive import failed',f'{p.name}: {e}')
   return out
@@ -1512,6 +1689,9 @@ class Window(QMainWindow):
    # //remarks: The OCR step has now run for this batch whatever the outcome, so a batch that found no
    # //remarks: text - or whose model failed to load - can still be finished by typing rows manually.
    self.recognized=True; self.update_actions()
+   # //remarks: Drop the detector and its torch allocations now the batch is over. The next batch pays the
+   # //remarks: one-off reload instead of the app holding ~500 MB while the user reviews or translates.
+   release_ocr_models()
  def region_lines(self,text):
   return [line.strip() for line in text.replace('\\r','').split('\\n') if line.strip()]
  def add(self):
@@ -1767,17 +1947,105 @@ class Window(QMainWindow):
    # //remarks: A failed batch still tells us the API is not usable with these settings.
    self.set_api_status(False,str(e))
    QMessageBox.critical(self,'Translation failed',str(e))
- def txt(self):
-  self.sync(); p,_=QFileDialog.getSaveFileName(self,'Export TXT','translation.txt','Text (*.txt)')
-  if p: Path(p).write_text('Page\tPanel\tRecognised text\tTranslation\n'+'\n'.join(f'{r.page}\t{r.panel}\t{r.jp}\t{r.tr}' for r in self.rows),encoding='utf-8')
- def docx(self):
-  self.sync(); p,_=QFileDialog.getSaveFileName(self,'Export DOCX','translation.docx','Word (*.docx)')
-  if p:
-   d=Document(); t=d.add_table(rows=1,cols=4)
-   for c,x in zip(t.rows[0].cells,['Page','Panel','Recognised text','Translation']): c.text=x
-   for r in self.rows:
-    cells=t.add_row().cells
-    for c,x in zip(cells,[r.page,r.panel,r.jp,r.tr]): c.text=str(x)
-   d.save(p)
+ def export(self):
+  # //remarks: One Export action instead of a button per format. The format is chosen in the dialog, so adding
+  # //remarks: another format later does not add another button to the toolbar. The file dialog's filter is the
+  # //remarks: picker: Qt switches the extension and the filter together, and the chosen filter is what decides
+  # //remarks: the writer, so the file name and the format can never disagree.
+  self.sync()
+  if not self.rows:
+   QMessageBox.information(self,'Nothing to export','Import images and click Recognise OCR first.'); return
+  filters='PDF document (*.pdf);;Word document (*.docx);;Plain text (*.txt)'
+  p,chosen=QFileDialog.getSaveFileName(self,'Export translation','translation.pdf',filters)
+  if not p: return
+  # //remarks: Trust the selected filter, then fall back to the extension the user typed. A name typed with a
+  # //remarks: different extension is corrected so the writer always matches the file on disk.
+  target=Path(p)
+  if '(*.docx)' in chosen: fmt='docx'
+  elif '(*.txt)' in chosen: fmt='txt'
+  elif '(*.pdf)' in chosen: fmt='pdf'
+  else: fmt={'.docx':'docx','.txt':'txt','.pdf':'pdf'}.get(target.suffix.lower(),'pdf')
+  if target.suffix.lower()!=f'.{fmt}': target=target.with_suffix(f'.{fmt}')
+  try:
+   if fmt=='txt': self.write_txt(target)
+   elif fmt=='docx': self.write_docx(target)
+   else: self.write_pdf(target)
+  except Exception as e:
+   QMessageBox.critical(self,'Export failed',f'{type(e).__name__}: {e}'); return
+  self.status.setText(f'Exported {len(self.rows)} row(s) to {target.name}.')
+ def write_txt(self,target):
+  Path(target).write_text('Page\tPanel\tRecognised text\tTranslation\n'+'\n'.join(f'{r.page}\t{r.panel}\t{r.jp}\t{r.tr}' for r in self.rows),encoding='utf-8')
+ def write_docx(self,target):
+  d=Document(); t=d.add_table(rows=1,cols=4)
+  for c,x in zip(t.rows[0].cells,['Page','Panel','Recognised text','Translation']): c.text=x
+  for r in self.rows:
+   cells=t.add_row().cells
+   for c,x in zip(cells,[r.page,r.panel,r.jp,r.tr]): c.text=str(x)
+  d.save(str(target))
+ def write_pdf(self,target):
+  # //remarks: Rendered with Pillow rather than a PDF library, because Pillow is already a dependency and
+  # //remarks: adding reportlab or fpdf for one export would grow the frozen build for no other benefit. The
+  # //remarks: table is drawn onto paginated A4 canvases at 150 DPI, so the text is real raster text at a
+  # //remarks: readable size and long chapters simply gain pages.
+  from PIL import Image,ImageDraw,ImageFont
+  # //remarks: A4 at 150 DPI. Margins and row height are in pixels at that resolution.
+  W,H=1240,1754; margin=60; header_h=40
+  def font(size,bold=False):
+   # //remarks: Try a few common Windows faces so the PDF looks like the app; fall back to Pillow's built-in
+   # //remarks: bitmap font when none is present, which still exports readable text.
+   names=['segoeui.ttf','arial.ttf','calibri.ttf'] if not bold else ['segoeuib.ttf','arialbd.ttf','calibrib.ttf']
+   for name in names:
+    try: return ImageFont.truetype(name,size)
+    except OSError: continue
+   try: return ImageFont.load_default(size)
+   except TypeError: return ImageFont.load_default()
+  body=font(19); head=font(19,True)
+  # //remarks: Column widths as fractions of the usable width, mirroring the on-screen table's emphasis on the
+  # //remarks: two text columns.
+  widths=[0.09,0.09,0.41,0.41]
+  usable=W-margin*2
+  cols=[int(usable*w) for w in widths]
+  pages=[]; img=None; draw=None; y=0
+  def new_page():
+   nonlocal img,draw,y
+   img=Image.new('RGB',(W,H),'white'); draw=ImageDraw.Draw(img)
+   x=margin
+   for label,width in zip(['PAGE','PANEL','Recognised text','TRANSLATION'],cols):
+    draw.rectangle([x,margin,x+width,margin+header_h],fill='#f1f3f5')
+    draw.text((x+6,margin+9),label,font=head,fill='#344054'); x+=width
+   y=margin+header_h
+   pages.append(img)
+  def wrap(text,width,fnt):
+   # //remarks: Greedy word wrap; a single word longer than the column is hard-split so it cannot overflow.
+   out=[]
+   for para in str(text).split('\n'):
+    line=''
+    for word in para.split(' '):
+     trial=(line+' '+word).strip()
+     if draw.textlength(trial,font=fnt)<=width-12: line=trial
+     else:
+      if line: out.append(line)
+      while draw.textlength(word,font=fnt)>width-12:
+       cut=len(word)
+       while cut>1 and draw.textlength(word[:cut],font=fnt)>width-12: cut-=1
+       out.append(word[:cut]); word=word[cut:]
+      line=word
+    out.append(line)
+   return out or ['']
+  new_page()
+  for r in self.rows:
+   cells=[str(r.page),str(r.panel),r.jp,r.tr]
+   wrapped=[wrap(c,cols[i],body) for i,c in enumerate(cells)]
+   lines=max(len(w) for w in wrapped)
+   need=lines*24+12
+   if y+need>H-margin: new_page()
+   x=margin
+   for i,chunks in enumerate(wrapped):
+    for n,line in enumerate(chunks): draw.text((x+6,y+6+n*24),line,font=body,fill='#101828')
+    x+=cols[i]
+   draw.line([margin,y+need-6,W-margin,y+need-6],fill='#dfe4eb')
+   y+=need
+  pages[0].save(str(target),'PDF',resolution=150.0,save_all=True,append_images=pages[1:])
+
 if __name__=='__main__':
  a=QApplication(sys.argv); w=Window(); w.show(); sys.exit(a.exec())

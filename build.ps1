@@ -34,7 +34,11 @@ if (!(Test-Path (Join-Path $ctdModel 'comictextdetector.pt'))) { throw "Missing 
 # //remarks: --collect-submodules psd_tools bundles the PSD compositing helpers: app.py imports psd_tools lazily
 # //remarks: inside flatten_psd, so static analysis alone would miss its compression/adjustment submodules and
 # //remarks: a .psd page would then fail to flatten inside the frozen EXE.
-py -3.14 -m PyInstaller --noconfirm --clean --windowed --noupx --hidden-import unicodedata --collect-data unidic_lite --collect-data manga_ocr --collect-submodules comic_text_detector --collect-all psd_tools --collect-all transformers --collect-all torchvision --icon $icon --version-file $versionInfo --add-data "$icon;assets" --add-data "$ocrModel;assets\manga-ocr-model" --add-data "$ctdModel;assets\comic-text-detector-model" --name BlueTL app.py
+# //remarks: --collect-all py7zr bundles the 7z reader the same way: app.py imports py7zr lazily inside the
+# //remarks: archive branch of expand_inputs, and without this the frozen EXE silently lost 7z support (the
+# //remarks: package appeared only as a "delayed" import in warn-BlueTL.txt). It also pulls in the pybcj,
+# //remarks: pyppmd and inflate64 codec backends that py7zr loads at run time.
+py -3.14 -m PyInstaller --noconfirm --clean --windowed --noupx --hidden-import unicodedata --collect-data unidic_lite --collect-data manga_ocr --collect-submodules comic_text_detector --collect-all psd_tools --collect-all py7zr --collect-all transformers --collect-all torchvision --icon $icon --version-file $versionInfo --add-data "$icon;assets" --add-data "$ocrModel;assets\manga-ocr-model" --add-data "$ctdModel;assets\comic-text-detector-model" --name BlueTL app.py
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE" }
 # //remarks: Fail the build loudly if the unidic dictionary data is missing, so a broken
 # //remarks: OCR bundle can never be shipped again (this was the cause of the OCR failure).
@@ -52,4 +56,8 @@ if (!(Test-Path $vit)) { throw "transformers image processing modules were not b
 # //remarks: PIL backend without them and detector preprocessing fails outright if they are absent.
 $tvC = Get-ChildItem (Join-Path $PSScriptRoot 'dist\BlueTL\_internal\torchvision') -Recurse -Filter '*.pyd' -ErrorAction SilentlyContinue
 if (!$tvC) { throw "torchvision compiled extensions were not bundled (torchvision._C missing)" }
+# //remarks: 7z support is a lazy import, so a build can succeed while quietly dropping it. Fail here instead
+# //remarks: of at the user's first .7z import, exactly like the unidic and detector checks above.
+$sevenZip = Join-Path $PSScriptRoot 'dist\BlueTL\_internal\py7zr\__init__.py'
+if (!(Test-Path $sevenZip)) { throw "py7zr was not bundled (7z import would fail at run time): $sevenZip" }
 Write-Host "Built: dist\BlueTL\BlueTL.exe"

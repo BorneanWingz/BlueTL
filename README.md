@@ -1,6 +1,6 @@
 # BlueTL — Manga Translation Desktop App
 
-[![Version](https://img.shields.io/badge/version-v1.0.2-magenta)](https://github.com/BorneanWingz/BlueTL)
+[![Version](https://img.shields.io/badge/version-v1.0.4-magenta)](https://github.com/BorneanWingz/BlueTL)
 [![Platform](https://img.shields.io/badge/platform-Windows-blue)]()
 [![License](https://img.shields.io/badge/license-MIT%20core%20%2F%20GPL--3.0%20component-green)](LICENSE.md)
 [![OCR](https://img.shields.io/badge/OCR-local-orange)]()
@@ -38,15 +38,20 @@ Provider model lists are cached per Base URL and restored on the next launch, in
 when the provider is temporarily offline. A bare host such as `localhost:1234` receives
 a scheme and `/v1` automatically. A model ID can also be typed manually.
 
-**Free models only** filters fetched model IDs containing `free` (case-insensitive).
+**Free models only** filters fetched model IDs containing `free` (case-insensitive). If no
+fetched model ID matches, the app says so and unticks the box, restoring the full list.
 When a non-free model is selected, free models are attempted first, followed by the
 selected model and then other models reported by the provider.
 
 ### Import and OCR
 
-BlueTL accepts JPG, JPEG, PNG, WebP, and PSD images, plus ZIP and RAR archives containing
-them. Files are ordered naturally by name, so `chapter-2.jpg` precedes `chapter-10.jpg`.
-Layered PSD files are composited with `psd-tools`, including 16-bit documents, before OCR.
+BlueTL accepts JPG, JPEG, PNG, WebP, and PSD images, plus ZIP, RAR, and 7Z archives
+containing them. A whole folder can be imported as well: cancelling the file dialog
+opens a folder picker that scans recursively, so a directory of pages or a parent folder
+holding one sub-folder per chapter both work. Files are ordered naturally by name, so
+`chapter-2.jpg` precedes `chapter-10.jpg`. Layered PSD files are composited with
+`psd-tools`, including 16-bit documents, before OCR.
+
 
 Text detection uses the vendored `comic_text_detector` package. Manga OCR is run only on
 detected text blocks; a page with no detected block is reported as having no text instead
@@ -60,16 +65,24 @@ the batch continues.
 - **Add row** inserts an editable row below the selected line.
 - **Delete row** removes unwanted or hallucinated lines.
 
+The detector and OCR model are released when a batch finishes, so the app does not keep
+roughly half a gigabyte of model memory resident while you review or translate. The next
+batch reloads them, which costs about a second.
+
 ### Export
 
-Translation rows can be exported to TXT or DOCX. Clearing a Translation cell makes that
-row eligible for translation again.
+One **Export** button opens a save dialog whose file-type picker chooses the format:
+**PDF**, **Word (DOCX)**, or **plain text (TXT)**. The chosen filter decides the writer, so
+the file name and the format always agree. PDF output paginates the table onto A4 pages at
+150 DPI and wraps long lines inside their column. Clearing a Translation cell makes that row
+eligible for translation again.
+
 
 ## Interface
 
 The Translator tab has a Connection card and a Job card. The Job card contains target
 language, model refresh, API status, image status, and the primary Import, Recognise OCR,
-and Translate all actions. Test API, export, and row-editing actions are grouped below.
+and Translate all actions. Test API, Export, and row-editing actions are grouped below.
 The About tab shows version and author information and links to the public README and
 optional [support page](https://buymeacoffee.com/DrLwSii).
 
@@ -110,20 +123,24 @@ provider model names do not automatically provide downloadable local weights.
 
 ## Version history
 
-### v1.0.2
+### v1.0.4
 
-- Redesigned interface with branded header, Connection card, and Job card.
-- Expanded model picker and added the **No free models detected** warning.
-- Added transparent icon background and Windows product/version metadata.
-- Renamed the connection confirmation action to **Save**.
+- Fixed the translation table: a selected or edited cell no longer paints over its text, so
+  the row stays readable while you click or type in it.
+- **Free models only** now unticks itself after the "No free models detected." message, so the
+  dropdown returns to the provider's full list instead of staying empty.
+- Replaced the separate **Export TXT** and **Export DOCX** buttons with one **Export** button
+  whose save dialog offers PDF, DOCX, or TXT.
+- Added PDF export, rendered with Pillow so no new dependency is needed.
 
-### v1.0.1
+### v1.0.3
 
-- Added explicit provider confirmation and model discovery through `GET /models`.
-- Added saved providers per Base URL and DPAPI-protected API-key storage.
-- Added the **Free models only** filter.
-- Added PSD support, including PSD files inside ZIP/RAR archives.
-- Fixed startup failures caused by non-ASCII or damaged UTF-8 settings files.
+- Import a whole folder: cancelling the file dialog opens a folder picker that scans
+  recursively, so a chapter directory or a parent folder of per-chapter sub-folders both work.
+- Added 7Z archive support alongside ZIP and RAR.
+- The detector and OCR model are released when a batch finishes, so the app no longer keeps
+  roughly half a gigabyte of model memory resident while you review or translate.
+- Capped the PyTorch CPU thread pool, which reduces the memory cost of the OCR runtime.
 
 ## Credits
 
@@ -134,7 +151,7 @@ BlueTL was informed by the architecture and documentation of these MIT-licensed 
 - [Lumina](https://github.com/lumina-tl/lumina)
 
 BlueTL uses PySide6, OpenAI's Python client, python-docx, Pillow, Manga OCR,
-OpenCV, PyTorch/torchvision, psd-tools, rarfile, and the vendored comic-text-detector.
+OpenCV, PyTorch/torchvision, psd-tools, rarfile, py7zr, and the vendored comic-text-detector.
 Their respective licenses remain applicable. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## License
@@ -145,5 +162,5 @@ with GPL-3.0 and provide the complete corresponding source. See [LICENSE.md](LIC
 
 ---
 
-*BlueTL · Version v1.0.2 · Author: Blue-Wingz @ facedesk · Published by borneanwingz.fl*
+*BlueTL · Version v1.0.4 · Author: Blue-Wingz @ facedesk · Published by borneanwingz.fl*
 

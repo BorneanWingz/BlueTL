@@ -156,6 +156,13 @@ class FakeMB:
     def critical(parent, title, text, *a, **k): mb_calls.append(('critical', title, text))
 bluetl.QMessageBox = FakeMB
 
+# Record browser launches too: the obsolete-build test must prove the release page is requested after the popup,
+# without opening the developer machine's real browser during an offscreen test run.
+browser_calls = []
+def fake_browser_open(url, *args, **kwargs):
+    browser_calls.append((url, args, kwargs)); return True
+bluetl.webbrowser.open = fake_browser_open
+
 from PySide6.QtWidgets import QApplication
 import time as _time
 qapp = QApplication.instance() or QApplication([])
@@ -178,7 +185,33 @@ def wait_idle(window, timeout=25):
         qapp.processEvents(); _time.sleep(0.02)
     qapp.processEvents()
 
-w = bluetl.Window(); w.model_timer.stop()
+w = bluetl.Window(); w.model_timer.stop(); w.update_poll.stop()
+# //remarks: Version ordering drives the update gate, and an obsolete build must acknowledge its popup before the
+# //remarks: exact newest release page is launched and the window closes.
+check('newer releases are sorted numerically and de-duplicated', bluetl.newer_releases('1.0.4',['v1.0.5','v1.0.10','v1.0.5','v1.0.3']) == ['v1.0.10','v1.0.5'])
+mb_calls.clear(); browser_calls.clear(); obsolete_events=[]
+original_critical = bluetl.QMessageBox.critical
+original_open = bluetl.webbrowser.open
+original_close = w.close
+bluetl.QMessageBox.critical = staticmethod(lambda *a, **k: (obsolete_events.append('popup'), original_critical(*a, **k))[1])
+bluetl.webbrowser.open = lambda url, *a, **k: (obsolete_events.append('browser'), original_open(url, *a, **k))[1]
+w.close = lambda: obsolete_events.append('close')
+w.enforce_update_gate(['v1.0.7','v1.0.6','v1.0.5'])
+check('obsolete popup opens newest release before closing', obsolete_events == ['popup','browser','close'], str(obsolete_events))
+check('obsolete build opens exact escaped GitHub tag page', browser_calls and browser_calls[-1][0] == 'https://github.com/BorneanWingz/BlueTL/releases/tag/v1.0.7', str(browser_calls))
+check('obsolete build is marked before shutdown completes', w.obsolete is True)
+for browser_failure in (False, bluetl.webbrowser.Error('no browser')):
+    obsolete_events.clear(); mb_calls.clear(); w.obsolete = False
+    def failed_open(url, *args, **kwargs):
+        obsolete_events.append('browser')
+        if isinstance(browser_failure, Exception): raise browser_failure
+        return browser_failure
+    bluetl.webbrowser.open = failed_open
+    w.enforce_update_gate(['v1.0.7-preview/one','v1.0.6','v1.0.5'])
+    check('browser failure still closes obsolete build', obsolete_events == ['popup','browser','close'] and w.obsolete, str(obsolete_events))
+    check('browser failure displays escaped manual release URL', any(call[0] == 'warning' and 'https://github.com/BorneanWingz/BlueTL/releases/tag/v1.0.7-preview%2Fone' in call[2] for call in mb_calls), str(mb_calls))
+bluetl.QMessageBox.critical = original_critical; bluetl.webbrowser.open = original_open; w.close = original_close
+mb_calls.clear(); browser_calls.clear()
 # //remarks: Nothing provider-specific is compiled in any more: a fresh install starts with an empty Base URL,
 # //remarks: an empty dropdown, and an unticked Free models only box. The list only ever comes from the provider.
 check('no base URL is hard-coded', w.url.text() == '', w.url.text())

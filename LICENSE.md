@@ -70,6 +70,7 @@ component. The split is deliberate and is the same shape as the app itself:
 | Geometry (text-block polygons) | pyclipper, shapely | MIT |
 | Deep learning runtime | PyTorch / torchvision | BSD-3 |
 | Archive reading | rarfile | ISC |
+| 7Z archive reading | py7zr (with pybcj, pyppmd) | LGPL-2.1-or-later |
 | Japanese tokenizer data | unidic_lite (bundled with the build) | BSD-3 / GPL/LGPL (MeCab dictionary components) |
 | Text-block detection | comic-text-detector (vendored in `comic_text_detector/`) | GPL-3.0 |
 
@@ -78,7 +79,8 @@ component. The split is deliberate and is the same shape as the app itself:
 - The **core** of BlueTL is built only from components with permissive licences
   (MIT, Apache-2.0, BSD, MIT-CMU, ISC, LGPL-3.0). PySide6 is LGPL-3.0, which allows
   proprietary use as long as Qt's own terms are honoured for the Qt parts themselves;
-  it does not impose its terms on the rest of BlueTL.
+  it does not impose its terms on the rest of BlueTL. py7zr is LGPL-2.1-or-later and is
+  used as an unmodified installed library, which that licence permits.
 - The **vendored comic-text-detector** is the one GPL-3.0 component. Because it is
   statically bundled into the distributed executable, the whole distributed build
   must be treated as a GPL-3.0 combined work. Keep the upstream `LICENSE` file in

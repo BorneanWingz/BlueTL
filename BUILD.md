@@ -1,12 +1,45 @@
 # BlueTL — Build and Release Notes
 
-**Current version: v1.0.2**
+**Current version: v1.0.4**
 
 This document lists the changelog of BlueTL and what is inside a released build.
 
 ---
 
 ## 1. Release history
+
+### Version v1.0.4
+
+- Obsolete builds now open the newest BlueTL GitHub release in the user's default browser after the blocking notice is dismissed and before the executable closes, so the replacement download is immediately available.
+- If the browser cannot be opened, the release URL is shown for manual use before the obsolete build closes.
+- Fixed the translation table painting over its text: added explicit
+  `QTableWidget::item:selected` rules (active and inactive) and a `QTableWidget QLineEdit`
+  rule, so a clicked or edited cell keeps its text visible instead of turning white.
+- **Free models only** now unticks itself after the "No free models detected." message and
+  restores the provider's full list, instead of leaving an empty dropdown.
+- Replaced the **Export TXT** and **Export DOCX** buttons with a single **Export** button.
+  The save dialog's file-type picker selects PDF, DOCX, or TXT, and the chosen filter decides
+  the writer, so the extension and the format cannot disagree.
+- Added PDF export. It is rendered with Pillow (already a dependency) onto paginated A4
+  canvases at 150 DPI, with greedy word wrap and hard-splitting of over-long words, so no new
+  dependency was added to the bundle.
+- The export writers are now separate methods (`write_txt`, `write_docx`, `write_pdf`) behind
+  one `export()` entry point, and export failures are reported in a dialog instead of raising.
+
+### Version v1.0.3
+
+- Import now accepts a whole folder: cancelling the file dialog opens a folder picker that
+  scans recursively for JPG, JPEG, PNG, WebP, PSD, ZIP, RAR and 7Z files.
+- Added 7Z archive support with py7zr, including the same path-traversal guard the ZIP
+  branch applies.
+- Added `release_ocr_models()`, called when an OCR batch ends, which drops the cached
+  detector, empties the CUDA cache and runs a garbage collection. Measured effect: the
+  detector load takes the process from ~76 MB to ~521 MB and the release returns it to
+  ~476 MB. The remaining ~400 MB is torch's mapped DLLs, which Windows does not unload.
+- Capped the PyTorch CPU thread pool at four threads to reduce per-thread allocation arenas.
+- Consolidated the accepted file extensions into `IMAGE_SUFFIXES`, `ARCHIVE_SUFFIXES` and
+  `IMPORT_SUFFIXES`, so the file dialog, folder scan and archive extraction cannot drift.
+- New dependency: `py7zr>=0.21,<1` (LGPL-2.1-or-later).
 
 ### Version v1.0.2
 
