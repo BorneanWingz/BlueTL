@@ -700,6 +700,162 @@ visible = [wl.connect_button.text(), wl.refresh_button.text(), wl.ocr_button.tex
 offenders = [t for t in visible if any(us in t for us in US_SPELLINGS)]
 check('no American spellings in visible text', not offenders, str(offenders))
 
+# ---- 11. Stop button and free-token reminder -----------------------------------
+# //remarks: Stop must be reachable beside Translate all, must be inert while nothing runs, and must interrupt both
+# //remarks: phases: OCR (which Translate all runs first) and translation. The batch loops read one flag, so the
+# //remarks: tests drive that flag exactly as the button does.
+ws = bluetl.Window(); ws.model_timer.stop()
+if hasattr(ws, 'update_poll'): ws.update_poll.stop()
+# //remarks: The primary action row is the layout that holds Import, Recognise OCR, Translate all and Stop. It is
+# //remarks: found by walking the job card's layouts rather than by guessing an index.
+_job_card = ws.stop_button.parentWidget()
+action_row = next(l for l in _job_card.findChildren(bluetl.QHBoxLayout)
+                  if l.count() == 4 and l.itemAt(l.count() - 1).widget() is ws.stop_button)
+check('Stop sits beside Translate all', ws.stop_button.parentWidget() is ws.ocr_button.parentWidget(), str(ws.stop_button.parentWidget()))
+check('Stop is the last action in the primary row', action_row.itemAt(0).widget() is ws.import_button and action_row.itemAt(1).widget() is ws.ocr_button and action_row.itemAt(3).widget() is ws.stop_button, str([action_row.itemAt(i).widget().text() if action_row.itemAt(i).widget() else None for i in range(action_row.count())]))
+check('Stop label is exact', ws.stop_button.text() == 'Stop', repr(ws.stop_button.text()))
+check('Stop is disabled while idle', ws.stop_button.isEnabled() is False)
+check('Stop is styled as a danger action', ws.stop_button.objectName() == 'stopAction', ws.stop_button.objectName())
+check('Stop tooltip mentions both phases', 'OCR' in ws.stop_button.toolTip() and 'translation' in ws.stop_button.toolTip(), ws.stop_button.toolTip())
+
+# //remarks: A batch switches the button on, and a stop request is cleared when the next batch starts.
+ws.set_running(True)
+check('Stop is enabled during a batch', ws.stop_button.isEnabled() is True)
+check('starting a batch clears the stop flag', ws.stop_requested is False)
+ws.stop()
+check('pressing Stop raises the stop flag', ws.stop_requested is True)
+check('pressing Stop keeps the button available', ws.stop_button.isEnabled() is True)
+check('pressing Stop reports that it is stopping', 'Stopping' in ws.status.text(), ws.status.text())
+ws.set_running(False)
+check('Stop is disabled once the batch ends', ws.stop_button.isEnabled() is False)
+ws.set_running(True)
+check('a new batch clears the previous stop', ws.stop_requested is False)
+ws.set_running(False)
+ws.status.setText('idle')
+ws.stop()
+check('Stop pressed while idle changes nothing', ws.stop_requested is False and 'Start a batch' in ws.status.text(), ws.status.text())
+
+# //remarks: StopRequested must not be mistaken for a provider failure, and the quota helper must recognise the
+# //remarks: shapes providers use for an exhausted free allowance.
+check('StopRequested is an exception type', isinstance(bluetl.StopRequested(), Exception))
+class FakeProviderError(Exception):
+    def __init__(self, message, status_code=None, body=''):
+        super().__init__(message); self.status_code = status_code; self.body = body
+check('HTTP 429 counts as a used-up limit', bluetl.quota_exceeded(FakeProviderError('slow down', 429)))
+check('HTTP 402 counts as a used-up limit', bluetl.quota_exceeded(FakeProviderError('payment required', 402)))
+check('insufficient_quota body counts as a used-up limit', bluetl.quota_exceeded(FakeProviderError('error', 400, '{"code":"insufficient_quota"}')))
+check('free-trial wording counts as a used-up limit', bluetl.quota_exceeded(FakeProviderError('you have exhausted your free trial credits')))
+check('a plain failure is not a limit', bluetl.quota_exceeded(FakeProviderError('invalid api key', 401)) is False)
+
+# //remarks: The reminder popup is shown once per batch, names every affected model, and is a warning rather than a
+# //remarks: generic critical failure.
+mb_calls.clear()
+ws.record_quota_limit('free-model-a', FakeProviderError('quota gone', 429))
+ws.record_quota_limit('free-model-a', FakeProviderError('quota gone', 429))
+ws.record_quota_limit('free-model-b', FakeProviderError('no credits', 402))
+check('each affected model is recorded once', len(ws.quota_limits_seen) == 2, str(ws.quota_limits_seen))
+check('the limit reminder is shown', ws.show_quota_limit_notice() is True)
+check('the reminder is a warning popup', [c[0] for c in mb_calls] == ['warning'], str(mb_calls))
+check('the reminder names the affected models', 'free-model-a' in mb_calls[-1][2] and 'free-model-b' in mb_calls[-1][2], mb_calls[-1][2])
+check('the reminder mentions free tokens', 'free tokens' in mb_calls[-1][2].lower(), mb_calls[-1][2])
+check('the reminder is shown only once per batch', ws.show_quota_limit_notice() is False and len(mb_calls) == 1, str(mb_calls))
+
+# //remarks: A stop during translation keeps the rows already translated and never reports a failure. The fake
+# //remarks: client raises StopRequested on the second row, exactly as the real loop does when the flag is set.
+class FakeReply:
+    class _Choice:
+        class _Message:
+            content = 'translated line'
+        message = _Message()
+    choices = [_Choice()]
+class StopAfterOneClient:
+    def __init__(self): self.calls = 0
+    @property
+    def chat(self): return self
+    @property
+    def completions(self): return self
+    def create(self, **kwargs):
+        self.calls += 1
+        if self.calls > 1: raise bluetl.StopRequested()
+        return FakeReply()
+ws.paths = []; ws.rows = [bluetl.Row(1, 1, 'jp-one'), bluetl.Row(1, 2, 'jp-two'), bluetl.Row(1, 3, 'jp-three')]
+# //remarks: The fallback chain is built from the Model dropdown, so a model must be selected for translate() to
+# //remarks: have a candidate to call. set_models() is the real path the provider list uses.
+ws.set_models(['free-model-a'])
+ws.refresh()
+ws.client = lambda: StopAfterOneClient()
+mb_calls.clear()
+ws.all()
+check('a stopped batch keeps the finished row', ws.rows[0].tr == 'translated line', ws.rows[0].tr)
+check('a stopped batch leaves later rows untranslated', ws.rows[1].tr == '' and ws.rows[2].tr == '', str([r.tr for r in ws.rows]))
+check('a stopped batch is reported as stopped, not failed', 'stopped' in ws.status.text().lower(), ws.status.text())
+check('a stopped batch shows no failure dialog', mb_calls == [], str(mb_calls))
+check('a stopped batch disables Stop again', ws.stop_button.isEnabled() is False)
+
+# //remarks: A used-up free allowance ends the batch with the reminder popup instead of the generic failure dialog.
+class QuotaClient:
+    @property
+    def chat(self): return self
+    @property
+    def completions(self): return self
+    def create(self, **kwargs): raise FakeProviderError('free tier exhausted', 429)
+ws.rows = [bluetl.Row(1, 1, 'jp-one')]; ws.refresh()
+ws.client = lambda: QuotaClient()
+mb_calls.clear()
+ws.all()
+check('an exhausted allowance shows the reminder popup', any(c[0] == 'warning' and 'free tokens' in c[2].lower() for c in mb_calls), str(mb_calls))
+check('an exhausted allowance hides the generic failure dialog', not any(c[0] == 'critical' for c in mb_calls), str(mb_calls))
+
+# ---- 12. Import picker ---------------------------------------------------------
+# //remarks: Import offers files or one folder. Several files can be selected at once, a folder import scans
+# //remarks: recursively, and batch folders are a paid feature that is visible but disabled.
+wi = bluetl.Window(); wi.model_timer.stop()
+if hasattr(wi, 'update_poll'): wi.update_poll.stop()
+check('Import button is kept on the window for the picker anchor', wi.import_button.text() == 'Import', wi.import_button.text())
+check('Import tooltip mentions files and folders', 'files' in wi.import_button.toolTip() and 'folder' in wi.import_button.toolTip(), wi.import_button.toolTip())
+check('Import has separate file and folder entry points', callable(wi.import_files) and callable(wi.import_folder) and callable(wi.load_images))
+_source = open(bluetl.__file__, encoding='utf-8').read()
+check('Import uses a picker menu with a paid batch entry', 'QMenu' in _source and 'Batch folders (paid)' in _source)
+
+# //remarks: The file picker accepts many files and the folder picker scans one folder. Both dialogs are stubbed so
+# //remarks: the test never opens a real window, and the shared load_images() step runs for real.
+import tempfile as _tempfile
+from PIL import Image as _PILImage
+_pick = _tempfile.mkdtemp(prefix='bluetl_pick_')
+_p1 = os.path.join(_pick, 'page-1.png'); _p2 = os.path.join(_pick, 'page-10.png'); _p3 = os.path.join(_pick, 'page-2.png')
+for _p in (_p1, _p2, _p3): _PILImage.new('RGB', (8, 8), 'white').save(_p)
+_folder = os.path.join(_pick, 'chapter'); os.makedirs(_folder, exist_ok=True)
+_f1 = os.path.join(_folder, '001.png'); _PILImage.new('RGB', (8, 8), 'white').save(_f1)
+_nested = os.path.join(_pick, 'parent_with_chapters'); os.makedirs(os.path.join(_nested, 'chapter-1'), exist_ok=True)
+_PILImage.new('RGB', (8, 8), 'white').save(os.path.join(_nested, 'chapter-1', '001.png'))
+original_get_open = bluetl.QFileDialog.getOpenFileNames
+original_get_dir = bluetl.QFileDialog.getExistingDirectory
+bluetl.QFileDialog.getOpenFileNames = staticmethod(lambda *a, **k: ([_p1, _p2, _p3], 'Manga files (*.png)'))
+wi.import_files()
+check('several files can be imported at once', len(wi.paths) == 3, str(wi.paths))
+check('imported files are ordered naturally by name', [os.path.basename(p) for p in wi.paths] == ['page-1.png', 'page-2.png', 'page-10.png'], str([os.path.basename(p) for p in wi.paths]))
+check('a file import remembers the file folder', wi.last_dir == _pick, wi.last_dir)
+bluetl.QFileDialog.getExistingDirectory = staticmethod(lambda *a, **k: _folder)
+wi.import_folder()
+check('one folder can be imported', len(wi.paths) == 1 and os.path.basename(wi.paths[0]) == '001.png', str(wi.paths))
+check('a folder import remembers the folder', wi.last_dir == _folder, wi.last_dir)
+_previous_paths = list(wi.paths)
+bluetl.QFileDialog.getExistingDirectory = staticmethod(lambda *a, **k: _nested)
+wi.import_folder()
+check('a folder with sub-folders is rejected', wi.paths == _previous_paths, str(wi.paths))
+check('nested folder rejection explains the paid batch boundary', any(c[0] == 'warning' and 'sub-folder' in c[2].lower() for c in mb_calls), str(mb_calls))
+
+bluetl.QFileDialog.getExistingDirectory = staticmethod(lambda *a, **k: '')
+wi.paths = []; wi.import_folder()
+check('cancelling the folder picker imports nothing', wi.paths == [], str(wi.paths))
+bluetl.QFileDialog.getOpenFileNames = original_get_open
+bluetl.QFileDialog.getExistingDirectory = original_get_dir
+
+# //remarks: A new import must not inherit a stop left over from the previous batch.
+wi.stop_requested = True
+wi.load_images([_p1], _pick)
+check('a new import clears an old stop request', wi.stop_requested is False)
+
 # //remarks: The mock server is stopped once every section that needed it has finished.
 server.shutdown()
 

@@ -34,7 +34,7 @@ def unprotect(value):
 from dataclasses import dataclass
 from openai import OpenAI
 from docx import Document
-from PySide6.QtWidgets import QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QFrame,QLineEdit,QComboBox,QPushButton,QFileDialog,QTableWidget,QTableWidgetItem,QMessageBox,QLabel,QHeaderView,QTabWidget,QProgressBar,QCheckBox
+from PySide6.QtWidgets import QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QFrame,QLineEdit,QComboBox,QPushButton,QFileDialog,QTableWidget,QTableWidgetItem,QMessageBox,QLabel,QHeaderView,QTabWidget,QProgressBar,QCheckBox,QMenu
 from PySide6.QtCore import Qt,QTimer
 from PySide6.QtGui import QIcon
 
@@ -153,6 +153,27 @@ def remember_profile(data,url,key_cipher,models=None,verified=None,model=None):
  return data
 @dataclass
 class Row: page:int; panel:int; jp:str; tr:str=''; crop:str=''; review:str=''; reason:str=''
+
+# //remarks: Raised inside a batch loop when the user presses Stop. It is not an error: the caller keeps
+# //remarks: whatever was already finished and reports a stop instead of showing a failure dialog.
+class StopRequested(Exception):
+ pass
+
+# //remarks: Wording a provider uses when a model's free allowance or request budget is exhausted, so the batch
+# //remarks: can stop with a clear reminder instead of a generic failure dialog. Both error codes and the prose a
+# //remarks: provider puts in the message are matched, because the same condition is reported either way.
+QUOTA_CODES=('insufficient_quota','rate_limit','quota_exceeded','token_limit','tokens_exhausted','insufficient_balance','free_trial','free trial','no_free_credits','no free credits','billing_hard_limit_reached','credit_balance_low','exhausted your','out of credits','out of tokens','free tier')
+
+def quota_exceeded(error):
+ # //remarks: Providers report a used-up free allowance in several different shapes, so the HTTP status and the
+ # //remarks: error text are both checked. 402 means the account has no credits left, 429 means the request budget
+ # //remarks: (for example a free-tier request cap) was hit, and the body often carries a code such as
+ # //remarks: insufficient_quota. The status is read defensively because not every error object carries one.
+ status=getattr(error,'status_code',None)
+ if status in (402,429): return True
+ body=' '.join(str(getattr(error,attr,'')) for attr in ('body','message','code') if getattr(error,attr,''))
+ text=(str(error)+' '+body).lower()
+ return any(hint in text for hint in QUOTA_CODES)
 
 # //remarks: Turn whatever the tester typed into a Base URL that model discovery can call. This value is only
 # //remarks: used for the GET request - the Base URL field keeps exactly what was typed, because the translation
@@ -628,6 +649,13 @@ class Window(QMainWindow):
    # //remarks: Tracks whether the OCR step has run for the current batch. Manual row insertion waits for
    # //remarks: that step, because a new row takes its page and panel number from the recognised rows.
    self.recognized=False
+   # //remarks: Set to True by the Stop button to interrupt a running OCR or translation batch.
+   self.stop_requested=False
+   # //remarks: True only while a batch is in flight, so the Stop button is clickable exactly then.
+   self.busy=False
+   # //remarks: (model, error) pairs whose free allowance or request limit ran out during the current batch,
+   # //remarks: collected so one reminder popup can list every affected model when the batch ends.
+   self.quota_limits_seen=[]
    # //remarks: Remember the last folder used by the import dialog across application restarts.
    self.last_dir=''
    # //remarks: Folder holding the crop of every recognised region, so a flagged line can be compared with
@@ -792,12 +820,23 @@ class Window(QMainWindow):
   self.delete_button.clicked.connect(self.delete)
   import_button=QPushButton('Import')
   import_button.clicked.connect(self.images)
+  # //remarks: The Import button opens a picker menu, so it is kept on the instance to anchor that menu under it.
+  self.import_button=import_button
+  import_button.setToolTip('Import manga images or archives. Choose several files at once, or one folder.')
   translate_button=QPushButton('Translate all')
   translate_button.setObjectName('primaryAction')
   translate_button.clicked.connect(self.all)
+  # //remarks: Stop sits beside Translate all and interrupts whichever batch is running - OCR or translation -
+  # //remarks: because Translate all runs OCR first when the batch has not been recognised yet. It stays disabled
+  # //remarks: while nothing is running so it never looks like a dead button.
+  self.stop_button=QPushButton('Stop')
+  self.stop_button.setObjectName('stopAction')
+  self.stop_button.setToolTip('Stop the running OCR or translation batch. Finished rows are kept.')
+  self.stop_button.clicked.connect(self.stop)
+  self.stop_button.setEnabled(False)
   action_row=QHBoxLayout(); action_row.setSpacing(10)
   import_button.setMinimumWidth(140); self.ocr_button.setMinimumWidth(180)
-  action_row.addWidget(import_button); action_row.addWidget(self.ocr_button); action_row.addWidget(translate_button,1)
+  action_row.addWidget(import_button); action_row.addWidget(self.ocr_button); action_row.addWidget(translate_button,1); action_row.addWidget(self.stop_button)
   job.addLayout(action_row)
 
   self.test_api_button=QPushButton('Test API'); self.test_api_button.clicked.connect(self.test_api)
@@ -856,6 +895,9 @@ class Window(QMainWindow):
    QPushButton#connectAction:hover { background: #16834a; }
    QPushButton#primaryAction { color: #ffffff; background: #2563eb; border: 0; font-size: 9pt; font-weight: 600; }
    QPushButton#primaryAction:hover { background: #1d4ed8; }
+   QPushButton#stopAction { color: #ffffff; background: #c62828; border: 0; font-weight: 600; min-width: 88px; }
+   QPushButton#stopAction:hover { background: #a51f1f; }
+   QPushButton#stopAction:disabled { color: #98a2b3; background: #f4f5f7; }
    QTableWidget { background: #ffffff; alternate-background-color: #fafbfc; border: 1px solid #dfe4eb; border-radius: 8px; }
    QHeaderView::section { background: #f1f3f5; color: #344054; padding: 6px; border: 0; border-bottom: 1px solid #dfe4eb; font-weight: 600; }
    QTableWidget::item { padding: 4px; border-bottom: 1px dashed #d8dde5; }
@@ -1484,6 +1526,29 @@ class Window(QMainWindow):
   # //remarks: can still be completed by hand. Deleting only needs a row that exists.
   self.add_button.setEnabled(self.recognized)
   self.delete_button.setEnabled(bool(self.rows))
+  # //remarks: Stop is only meaningful while a batch is in flight, so it follows the same single flag the batch
+  # //remarks: loops read. update_actions() is called from every path that changes that state.
+  if hasattr(self,'stop_button'): self.stop_button.setEnabled(self.busy)
+
+ def record_quota_limit(self,model,error):
+  # //remarks: Remember each model whose free allowance ran out once, so the reminder at the end of the batch
+  # //remarks: lists every limit that was hit instead of repeating one popup per row.
+  if model in [m for m,_ in self.quota_limits_seen]: return
+  self.quota_limits_seen.append((model,str(error)))
+
+ def show_quota_limit_notice(self):
+  # //remarks: One popup per batch to remind the user that the free tokens or request limit of a model ran out,
+  # //remarks: instead of burying it in a generic failure dialog. Returns True when the popup was shown so the
+  # //remarks: caller can skip a second, duplicate dialog.
+  if not self.quota_limits_seen: return False
+  seen=list(self.quota_limits_seen); self.quota_limits_seen=[]
+  detail='\n'.join(f'  - {m}: {d}' for m,d in seen)
+  QMessageBox.warning(self,'Free tokens or model limit reached',
+   'The chosen model, or one of the fallback models, ran out of free tokens or reached its request limit while'
+   ' translating, so the batch could not be completed.\n\n'
+   'Affected model(s):\n'+detail+'\n\n'
+   'Pick another model, wait for the limit to reset, or press Translate all again to retry the remaining rows.')
+  return True
  def ranked(self,selected):
   # //remarks: The retry order is built from whatever list is currently in the dropdown, so a tester's own
   # //remarks: provider models (discovery result or typed IDs) take part in the fallback chain. There is no
@@ -1519,27 +1584,51 @@ class Window(QMainWindow):
   root=Path(folder)
   return [str(p) for p in sorted(root.rglob('*'),key=lambda x:_name_key(str(x.relative_to(root)))) if p.is_file() and p.suffix.lower() in IMPORT_SUFFIXES]
  def images(self):
-  # //remarks: Pass the remembered folder as the dialog's starting directory and remember the folder of the
-  # //remarks: selection immediately, so the next import reopens where the user left off.
-  # //remarks: A whole folder can be imported too: a chapter is usually one directory of images, and picking
-  # //remarks: every file by hand is the slowest part of a batch. The folder is scanned recursively, so a
-  # //remarks: parent directory holding one sub-folder per chapter also works.
-  selected,_=QFileDialog.getOpenFileNames(self,'Select manga images, archives or a folder',self.dialog_dir(),'Manga files (*.jpg *.jpeg *.png *.webp *.psd *.zip *.rar *.7z);;All files (*)')
+  # //remarks: Import is a picker rather than a single dialog, because a batch can arrive as either a handful of
+  # //remarks: files or one folder of pages, and the file dialog cannot return a folder. A menu makes the choice
+  # //remarks: explicit instead of guessing from a cancelled dialog.
+  menu=QMenu(self)
+  files_action=menu.addAction('Select files...')
+  files_action.setToolTip('Choose one or more manga images or archives. Several files can be selected at once.')
+  folder_action=menu.addAction('Select a folder...')
+  folder_action.setToolTip('Choose one folder of manga images or archives. Only one folder can be imported at a time.')
+  # //remarks: Batch folders are a paid feature that is not released yet. The entry stays visible but disabled so
+  # //remarks: the upgrade path is discoverable, and its tooltip explains why it cannot be used yet.
+  batch_action=menu.addAction('Batch folders (paid) - coming soon')
+  batch_action.setEnabled(False)
+  batch_action.setToolTip('Importing several folders in one batch will be a paid feature. It is not available in this version.')
+  chosen=menu.exec(self.import_button.mapToGlobal(self.import_button.rect().bottomLeft()))
+  if chosen is files_action: self.import_files()
+  elif chosen is folder_action: self.import_folder()
+ def import_files(self):
+  # //remarks: Several files may be selected in one go; they are ordered by name afterwards, so the selection
+  # //remarks: order does not matter. The remembered folder is the dialog's starting directory.
+  selected,_=QFileDialog.getOpenFileNames(self,'Select manga images or archives',self.dialog_dir(),'Manga files (*.jpg *.jpeg *.png *.webp *.psd *.zip *.rar *.7z);;All files (*)')
+  if not selected: return
+  # //remarks: Remember the folder of the last imported file, not the first one. A selection can span several
+  # //remarks: folders (for example a chapter and its archive in another directory) and the last file is the
+  # //remarks: one the user worked with most recently.
+  self.load_images(selected,str(Path(selected[-1]).parent))
+ def import_folder(self):
+  # //remarks: Exactly one folder per import. A chapter is usually one directory of images, and picking every file
+  # //remarks: by hand is the slowest part of a batch; the folder is scanned recursively, so a parent directory
+  # //remarks: holding one sub-folder per chapter also works.
+  folder=QFileDialog.getExistingDirectory(self,'Select a folder of manga images or archives',self.dialog_dir())
+  if not folder: return
+  root=Path(folder)
+  if any(child.is_dir() for child in root.iterdir()):
+   QMessageBox.warning(self,'Sub-folders are not supported','Import one folder at a time. The selected folder contains sub-folders; choose the specific folder containing the manga images or archives.')
+   return
+
+  selected=self.scan_folder(folder)
   if not selected:
-   # //remarks: The file dialog cannot return a folder, so a folder import is a separate, explicit choice.
-   # //remarks: It is offered only after the file dialog is cancelled, which leaves the common path unchanged.
-   folder=QFileDialog.getExistingDirectory(self,'Select a folder of manga images or archives',self.dialog_dir())
-   if not folder: return
-   selected=self.scan_folder(folder)
-   if not selected:
-    QMessageBox.information(self,'Nothing to import',f'No JPG, JPEG, PNG, WebP, PSD, ZIP, RAR, or 7Z files were found in:\n{folder}')
-    return
-   self.last_dir=folder
-  else:
-   # //remarks: Remember the folder of the last imported file, not the first one. A selection can span several
-   # //remarks: folders (for example a chapter and its archive in another directory) and the last file is the
-   # //remarks: one the user worked with most recently.
-   self.last_dir=str(Path(selected[-1]).parent)
+   QMessageBox.information(self,'Nothing to import',f'No JPG, JPEG, PNG, WebP, PSD, ZIP, RAR, or 7Z files were found in:\n{folder}')
+   return
+  self.load_images(selected,folder)
+ def load_images(self,selected,last_dir):
+  # //remarks: One path for both import choices: the picked files or the scanned folder go through the same
+  # //remarks: expand_inputs() step, so name ordering, archive extraction and PSD flattening behave identically.
+  self.last_dir=last_dir
   # //remarks: Persist at once so the remembered folder survives an abrupt exit, and never let an unwritable
   # //remarks: settings file abort the import.
   note=''
@@ -1551,6 +1640,8 @@ class Window(QMainWindow):
   self.rows=[]
   # //remarks: The new batch has not been recognised yet, so manual row insertion waits for that step.
   self.recognized=False
+  # //remarks: A new batch is not running yet, so a stop left over from the previous one must not cancel it.
+  self.stop_requested=False
   self.refresh(); self.update_actions()
   # //remarks: Import feedback: tick only when usable images were found, cross when the
   # //remarks: selection/archives yielded nothing, so a silent no-op is now visible.
@@ -1631,10 +1722,16 @@ class Window(QMainWindow):
    # //remarks: OCR can take a long time per page; a busy bar makes it clear the app is working. Both the
    # //remarks: detector and Manga OCR run on the first page, so the label names both steps.
    self.begin_busy('Detecting text and running OCR...')
+   # //remarks: Stop is clickable for the whole OCR phase, including the model load that happens before the
+   # //remarks: first page, because loading the detector and Manga OCR is itself a long step.
+   self.set_running(True)
    # //remarks: Pages where the detector found no text are collected, so a page that produced no rows
    # //remarks: is reported in the status line instead of looking like a silent success.
    empty_pages=[]
    for index,path in enumerate(self.paths,1):
+    # //remarks: The Stop button is honoured between pages, so pressing it never leaves a half-written row and
+    # //remarks: the rows recognised so far are kept for review.
+    if self.stop_requested: raise StopRequested()
     # //remarks: The page number follows the file name, so "007.jpg" is reported as page 7 instead of
     # //remarks: the position the file happens to have in the batch. A name without any digits falls
     # //remarks: back to the batch position, so every row still gets a usable page number.
@@ -1650,6 +1747,9 @@ class Window(QMainWindow):
      self.set_progress(index-1,len(self.paths),f'OCR file {index}/{len(self.paths)}: {Path(path).name} (page {page}, {len(crops)} region(s))')
      panel=0
      for region,(box,crop) in enumerate(crops,1):
+      # //remarks: A page can hold dozens of regions, so Stop is also honoured between regions instead of only
+      # //remarks: between pages.
+      if self.stop_requested: raise StopRequested()
       self.set_progress(index-1,len(self.paths),f'OCR file {index}/{len(self.paths)}, region {region}/{len(crops)}')
       # //remarks: Skip textless crops so the model cannot answer them with invented dialogue.
       if _is_blank(crop): continue
@@ -1671,6 +1771,10 @@ class Window(QMainWindow):
    skipped=', '.join(empty_pages)
    note=f' No text detected on page(s): {skipped}.' if empty_pages else ''
    self.refresh(); self.end_progress(f'OCR completed: {len(self.rows)} text region(s) across {len(self.paths)} page(s). Review before translating.{note}')
+  except StopRequested:
+   # //remarks: A stop is not a failure: keep the regions already recognised, tell the user how far the batch
+   # //remarks: got, and let them translate or review what is there.
+   self.refresh(); self.end_progress(f'OCR stopped: {len(self.rows)} text region(s) kept from the pages recognised so far.')
   except ImportError as e:
    # //remarks: Do not hide the actual dependency that failed. The old generic message said only
    # //remarks: "OCR is not installed", even when one detector dependency failed inside a frozen build.
@@ -1688,7 +1792,9 @@ class Window(QMainWindow):
   finally:
    # //remarks: The OCR step has now run for this batch whatever the outcome, so a batch that found no
    # //remarks: text - or whose model failed to load - can still be finished by typing rows manually.
-   self.recognized=True; self.update_actions()
+   self.recognized=True
+   # //remarks: The batch is over, so the Stop button goes back to disabled.
+   self.set_running(False)
    # //remarks: Drop the detector and its torch allocations now the batch is over. The next batch pays the
    # //remarks: one-off reload instead of the app holding ~500 MB while the user reviews or translates.
    release_ocr_models()
@@ -1820,6 +1926,28 @@ class Window(QMainWindow):
   self.progress.setVisible(False); self.progress.setRange(0,1); self.progress.setValue(0)
   if label: self.status.setText(label)
   QApplication.processEvents()
+
+ def set_running(self,running):
+  # //remarks: Single switch for a batch. Starting clears any earlier stop request and the quota list, so a
+  # //remarks: second run is never cancelled by a stale flag; ending disables the Stop button again.
+  self.busy=running
+  if running:
+   self.stop_requested=False
+   self.quota_limits_seen=[]
+  self.update_actions()
+
+ def stop(self):
+  # //remarks: The Stop button interrupts the current OCR or translation batch. Both phases run on the GUI
+  # //remarks: thread and only yield between pages, regions and rows, so the flag is read at the top of each
+  # //remarks: step and the batch unwinds as soon as it can; an in-flight API call or OCR inference always
+  # //remarks: returns first, which is why the status says the stop happens after the current step.
+  if self.busy:
+   self.stop_requested=True
+   self.status.setText('Stopping after the current step...')
+  else:
+   self.status.setText('Start a batch first, then press Stop.')
+  self.update_actions()
+
  def client(self):
   # //remarks: Enforce the same confirmation gate the UI shows. A request must never be sent from an unconfirmed
   # //remarks: draft, otherwise a half-typed Base URL would reach the network behind the user's back.
@@ -1838,13 +1966,23 @@ class Window(QMainWindow):
   prompt=f'Translate this Japanese manga text into {prof}. Preserve tone, emotion, politeness, slang, humour, and implied meaning. Return only the translation, with no notes or explanation.\\n\\nJapanese:\\n{text}'
   selected=self.model.currentText(); candidates=self.candidates(); last=None; self.last_model=''
   for model in candidates:
+   # //remarks: Stop is honoured between fallback attempts too, so a long chain of failing models cannot keep
+   # //remarks: the batch running after the user asked it to stop.
+   if self.stop_requested: raise StopRequested()
    try:
     r=client.chat.completions.create(model=model,messages=[{'role':'system','content':'You are a professional manga translator.'},{'role':'user','content':prompt}]); result=(r.choices[0].message.content or '').strip()
     # //remarks: Remember which model actually answered so the API pill tooltip is accurate.
     self.last_model=model
     if model != selected: self.status.setText(f'Fallback model used: {model}')
     return result
-   except Exception as e: last=e
+   except Exception as e:
+    # //remarks: A stop request must pass straight through the fallback loop, otherwise it would be recorded as
+    # //remarks: the last model error and reported as a provider failure.
+    if isinstance(e,StopRequested): raise
+    last=e
+    # //remarks: A model that has used up its free tokens or request limit is recorded so the user is reminded
+    # //remarks: with a popup once the batch ends, instead of only seeing a generic failure.
+    if quota_exceeded(e): self.record_quota_limit(model,e)
   raise RuntimeError(f'All configured models failed. Last error: {last}')
  def test_api(self):
   url=self.url.text().strip(); key=self.key.text().strip()
@@ -1856,24 +1994,41 @@ class Window(QMainWindow):
    QMessageBox.warning(self,'Connection not confirmed','Press Save first: the model list must be loaded before the API key can be tested.'); return
   c=OpenAI(base_url=url.rstrip('/'),api_key=key)
   last=None
-  for model in self.candidates():
-   try:
-    # //remarks: Busy bar for the probe request; a slow provider previously looked like a dead button.
-    self.begin_busy(f'Testing API model: {model}...')
-    r=c.chat.completions.create(model=model,messages=[{'role':'user','content':'Reply with exactly one word: OK.'}],max_tokens=8); reply=(r.choices[0].message.content or '').strip()
-    if re.fullmatch(r'(?:\s*OK[\s,.!;:]*)+',reply,re.IGNORECASE): reply='OK'
-    self.end_progress('API test succeeded.')
-    # //remarks: A successful probe flips the API pill to a green tick, records which model answered, and remembers
-    # //remarks: this provider as one whose key works - that is what lets the user come back to it later and what
-    # //remarks: unlocks the Model dropdown after Save.
-    self.set_api_status(True,f'Verified with model: {model}')
-    self.last_model=model
-    self.api_verified=profile_key(url)
-    self.save()
-    self.apply_connection_state()
-    QMessageBox.information(self,'API connection',f'Connection succeeded.\nModel: {model}\nResponse: {reply}')
-    return
-   except Exception as e: last=e
+  # //remarks: The probe is a batch of fallback attempts too, so Stop works here as well and the button is only
+  # //remarks: clickable while the attempts run.
+  self.set_running(True)
+  try:
+   for model in self.candidates():
+    if self.stop_requested: raise StopRequested()
+    try:
+     # //remarks: Busy bar for the probe request; a slow provider previously looked like a dead button.
+     self.begin_busy(f'Testing API model: {model}...')
+     r=c.chat.completions.create(model=model,messages=[{'role':'user','content':'Reply with exactly one word: OK.'}],max_tokens=8); reply=(r.choices[0].message.content or '').strip()
+     if re.fullmatch(r'(?:\s*OK[\s,.!;:]*)+',reply,re.IGNORECASE): reply='OK'
+     self.end_progress('API test succeeded.')
+     # //remarks: A successful probe flips the API pill to a green tick, records which model answered, and remembers
+     # //remarks: this provider as one whose key works - that is what lets the user come back to it later and what
+     # //remarks: unlocks the Model dropdown after Save.
+     self.set_api_status(True,f'Verified with model: {model}')
+     self.last_model=model
+     self.api_verified=profile_key(url)
+     self.save()
+     self.apply_connection_state()
+     QMessageBox.information(self,'API connection',f'Connection succeeded.\nModel: {model}\nResponse: {reply}')
+     return
+    except Exception as e:
+     # //remarks: A stop request must pass straight through the probe loop, otherwise it would be recorded as the
+     # //remarks: last model error and reported as a provider failure.
+     if isinstance(e,StopRequested): raise
+     last=e
+     # //remarks: A model whose free allowance ran out is remembered so the reminder popup can name it.
+     if quota_exceeded(e): self.record_quota_limit(model,e)
+  except StopRequested:
+   # //remarks: Stopping the probe is not a failure: the connection state is left exactly as it was.
+   self.end_progress('API test stopped.')
+   return
+  finally:
+   self.set_running(False)
   self.end_progress('API test failed.')
   # //remarks: Every candidate failed, so the pill shows a red cross with the last real provider error, and the
   # //remarks: provider loses its verified state: the key that is on screen demonstrably does not work.
@@ -1881,21 +2036,30 @@ class Window(QMainWindow):
   self.save()
   self.apply_connection_state()
   self.set_api_status(False,str(last))
-  QMessageBox.critical(self,'API connection failed',f'All configured models failed.\n\nLast error: {last}')
+  # //remarks: An exhausted free allowance is reported as the reminder popup rather than a generic failure.
+  if not self.show_quota_limit_notice(): QMessageBox.critical(self,'API connection failed',f'All configured models failed.\n\nLast error: {last}')
  def one(self):
   i=self.table.currentRow(); self.sync(); c=self.client()
   if c and i>=0 and self.rows[i].jp:
    # //remarks: Busy bar while the single request is in flight, so a slow model does not look frozen.
    self.begin_busy(f'Translating page {self.rows[i].page}, panel {self.rows[i].panel}...')
+   # //remarks: A single row is still a batch of fallback attempts, so Stop works here too.
+   self.set_running(True)
    try:
     self.rows[i].tr=self.translate(self.rows[i].jp,c); self.refresh()
     # //remarks: Translate-selected proves the API works, so the pill ticks itself too.
     self.set_api_status(True,f'Verified by translation with model: {self.last_model or self.model.currentText()}')
     self.end_progress('Row translated.')
+   except StopRequested:
+    # //remarks: Stopping a single row leaves it untranslated and is not reported as a failure.
+    self.end_progress('Translation stopped.')
    except Exception as e:
     self.end_progress('Translation failed.')
     self.set_api_status(False,str(e))
-    QMessageBox.critical(self,'Translation failed',str(e))
+    # //remarks: An exhausted free allowance is reported as the reminder popup rather than a generic failure.
+    if not self.show_quota_limit_notice(): QMessageBox.critical(self,'Translation failed',str(e))
+   finally:
+    self.set_running(False)
  def all(self):
   # //remarks: Translate all stays a single click: when nothing has been recognised for the imported batch
   # //remarks: yet, local OCR runs first. Recognising manually beforehand is therefore optional, and the
@@ -1903,6 +2067,11 @@ class Window(QMainWindow):
   # //remarks: fixing, or when the user wants to approve the lines before spending translation tokens.
   if self.paths and not self.rows:
    self.ocr()
+   # //remarks: Stop pressed during the OCR phase must also stop Translate all: the user asked the whole batch
+   # //remarks: to stop, so the translation phase is skipped and the recognised rows are kept for review.
+   if self.stop_requested:
+    self.status.setText(f'Stopped. {len(self.rows)} recognised row(s) kept; press Translate all again to continue.')
+    return
   self.sync()
   if not self.rows:
    QMessageBox.information(self,'No OCR text','Import images first, or click Recognise OCR to load the recognised lines.'); return
@@ -1922,8 +2091,13 @@ class Window(QMainWindow):
    return
   # //remarks: Report batch size up front so the progress bar has a meaningful denominator.
   self.begin_progress(len(todo),f'Translating 0/{len(todo)} rows...')
+  # //remarks: Stop becomes clickable for the whole translation phase and the quota list starts empty for this run.
+  self.set_running(True)
   try:
    for i,r in enumerate(todo,1):
+    # //remarks: Stop is honoured between rows. The request already in flight cannot be cancelled, so the row
+    # //remarks: that is being translated when Stop is pressed still completes and is kept.
+    if self.stop_requested: raise StopRequested()
     self.set_progress(i-1,len(todo),f'Translating row {i}/{len(todo)} (page {r.page}, panel {r.panel})...')
     r.tr=self.translate(r.jp,c)
     # //remarks: Update the table as each row completes so finished translations are visible during
@@ -1941,12 +2115,22 @@ class Window(QMainWindow):
    self.api_verified=profile_key(self.url.text().strip())
    self.apply_connection_state()
    self.save()
+  except StopRequested:
+   # //remarks: A stop keeps every finished row. The status line says how many were translated so the user knows
+   # //remarks: exactly where the batch was interrupted, and the connection is not marked failed.
+   done=len([r for r in todo if r.tr.strip()])
+   self.refresh(); self.end_progress(f'Translation stopped: {done}/{len(todo)} row(s) translated and kept.')
   except Exception as e:
    # //remarks: Hide the bar on failure too, otherwise a stalled bar looks like a hang.
    self.end_progress(f'Translation stopped: {e}')
    # //remarks: A failed batch still tells us the API is not usable with these settings.
    self.set_api_status(False,str(e))
-   QMessageBox.critical(self,'Translation failed',str(e))
+   # //remarks: When the cause was an exhausted free allowance, the reminder popup replaces the generic failure
+   # //remarks: dialog so the user is told what actually happened and what to do next.
+   if not self.show_quota_limit_notice(): QMessageBox.critical(self,'Translation failed',str(e))
+  finally:
+   # //remarks: The batch is over however it ended, so Stop goes back to disabled.
+   self.set_running(False)
  def export(self):
   # //remarks: One Export action instead of a button per format. The format is chosen in the dialog, so adding
   # //remarks: another format later does not add another button to the toolbar. The file dialog's filter is the

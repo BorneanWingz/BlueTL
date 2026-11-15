@@ -1,9 +1,8 @@
 # BlueTL — Manga Translation Desktop App
 
-[![Version](https://img.shields.io/badge/version-v1.0.4-magenta)](https://github.com/BorneanWingz/BlueTL)
+[![Version](https://img.shields.io/badge/version-v1.0.4-magenta)](https://github.com/BorneanWingz/BlueTL/blob/main/BUILD.md)
 [![Platform](https://img.shields.io/badge/platform-Windows-blue)]()
 [![License](https://img.shields.io/badge/license-MIT%20core%20%2F%20GPL--3.0%20component-green)](LICENSE.md)
-[![OCR](https://img.shields.io/badge/OCR-local-orange)]()
 
 <div align="center">
   <img src="assets/bluetl.png" alt="BlueTL icon" width="200" height="200">
@@ -15,15 +14,24 @@
 
 BlueTL is a Windows PySide6 application for translating manga pages. It detects text
 regions locally, recognises the text with Manga OCR, sends untranslated rows to any
-OpenAI-compatible API provider, and exports TXT or DOCX results.
+OpenAI-compatible API provider, and exports TXT, DOCX, or PDF results.
 
 - Runs from source or as a portable PyInstaller folder.
 - Local OCR does not require an API request.
 - Translation requires an internet connection to the configured provider.
 - No provider, API key, or model list is compiled into the executable.
+- Users are responsible for obtaining and configuring their own providers and API keys.
 - Settings are saved in `%APPDATA%\BlueTL\config.json`.
 - API keys are protected with Windows DPAPI and are never stored as plaintext.
 
+## Quick Start (Windows Portable)
+
+1. Download the latest release archive from the [Releases](https://github.com) page and extract the entire folder.
+2. Run `BlueTL.exe` (no installation required).
+3. Enter your OpenAI-compatible **Base URL** and **API key**, then press **Save**.
+
+
+**This app is not signed with Windows certificate, as with most self-developed executables, so Windows or antivirus software may show a false-positive warning.**
 
 ## Features
 
@@ -46,11 +54,12 @@ selected model and then other models reported by the provider.
 ### Import and OCR
 
 BlueTL accepts JPG, JPEG, PNG, WebP, and PSD images, plus ZIP, RAR, and 7Z archives
-containing them. A whole folder can be imported as well: cancelling the file dialog
-opens a folder picker that scans recursively, so a directory of pages or a parent folder
-holding one sub-folder per chapter both work. Files are ordered naturally by name, so
-`chapter-2.jpg` precedes `chapter-10.jpg`. Layered PSD files are composited with
-`psd-tools`, including 16-bit documents, before OCR.
+containing them. **Import** opens a picker with two choices: **Select files...** accepts
+several files at once, and **Select a folder...** imports exactly one folder, scanned
+recursively, so a directory of pages or a parent folder holding one sub-folder per chapter
+both work. Files are ordered naturally by name, so `chapter-2.jpg` precedes
+`chapter-10.jpg`. Layered PSD files are composited with `psd-tools`, including 16-bit
+documents, before OCR.
 
 
 Text detection uses the vendored `comic_text_detector` package. Manga OCR is run only on
@@ -62,8 +71,17 @@ the batch continues.
 
 - **Recognise OCR** runs local OCR without spending API tokens.
 - **Translate all** recognises first when needed, then translates only rows without a translation.
+- **Stop** sits beside **Translate all** and interrupts whichever batch is running. Because
+  Translate all runs OCR first when needed, Stop cancels both phases. Work already finished
+  is kept: recognised rows stay in the table and finished translations are not discarded.
+  The in-flight page or request always completes first, so the status line reads
+  *Stopping after the current step...* until the batch unwinds.
 - **Add row** inserts an editable row below the selected line.
 - **Delete row** removes unwanted or hallucinated lines.
+
+If the chosen model, or one of the fallback models, runs out of free tokens or reaches its
+request limit, a popup names the affected models and explains what to do next. It replaces
+the generic failure dialog and is shown once per batch rather than once per row.
 
 The detector and OCR model are released when a batch finishes, so the app does not keep
 roughly half a gigabyte of model memory resident while you review or translate. The next
@@ -82,9 +100,9 @@ eligible for translation again.
 
 The Translator tab has a Connection card and a Job card. The Job card contains target
 language, model refresh, API status, image status, and the primary Import, Recognise OCR,
-and Translate all actions. Test API, Export, and row-editing actions are grouped below.
+Translate all, and Stop actions. Test API, Export, and row-editing actions are grouped below.
 The About tab shows version and author information and links to the public README and
-optional [support page](https://buymeacoffee.com/DrLwSii).
+optional [donation page](https://buymeacoffee.com/DrLwSii).
 
 
 ## Run from source
@@ -123,6 +141,8 @@ provider model names do not automatically provide downloadable local weights.
 
 ## Version history
 
+**Current version: v1.0.4**
+
 ### v1.0.4
 
 - Fixed the translation table: a selected or edited cell no longer paints over its text, so
@@ -136,7 +156,7 @@ provider model names do not automatically provide downloadable local weights.
 ### v1.0.3
 
 - Import a whole folder: cancelling the file dialog opens a folder picker that scans
-  recursively, so a chapter directory or a parent folder of per-chapter sub-folders both work.
+  flatly, so a chapter directory or a parent folder of per-chapter sub-folders both work.
 - Added 7Z archive support alongside ZIP and RAR.
 - The detector and OCR model are released when a batch finishes, so the app no longer keeps
   roughly half a gigabyte of model memory resident while you review or translate.
