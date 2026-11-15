@@ -39,7 +39,23 @@ from PySide6.QtCore import Qt,QTimer
 from PySide6.QtGui import QIcon
 
 CFG=Path(os.getenv('APPDATA',Path.home()))/'BlueTL'/'config.json'
-LANGS=['English','Bahasa Melayu','Simplified Chinese','Traditional Chinese']
+LANGS=['English','Bahasa Melayu','Simplified Chinese','Traditional Chinese','Korean']
+LANGUAGE_LABELS={'English':'English','Bahasa Melayu':'Bahasa Malaysia','Simplified Chinese':'Simplified Chinese 简体中文','Traditional Chinese':'Traditional Chinese 繁體中文','Korean':'Korean 한국어'}
+EXPORT_FORMATS=[('pdf','PDF'),('docx','Word (DOCX)'),('txt','Plain Text (TXT)')]
+EXPORT_FILTERS={'pdf':'PDF document (*.pdf)','docx':'Word document (*.docx)','txt':'Plain text (*.txt)'}
+EXPORT_EXTENSIONS={'pdf':'.pdf','docx':'.docx','txt':'.txt'}
+EXPORT_FILTER_LIST=';;'.join(EXPORT_FILTERS[key] for key,_ in EXPORT_FORMATS)
+EXPORT_FORMAT_LABELS=dict(EXPORT_FORMATS)
+EXPORT_FORMAT_KEYS={label:key for key,label in EXPORT_FORMATS}
+
+def export_format_key(value):
+ return value if value in EXPORT_FORMAT_LABELS else EXPORT_FORMAT_KEYS.get(value,'pdf')
+
+
+def language_key(value):
+ return next((name for name,label in LANGUAGE_LABELS.items() if value in (name,label)),value)
+# //remarks: Korean is an API translation target. BlueTL's local Manga OCR remains Japanese-focused;
+# //remarks: Korean OCR requires the separate AzureTL PaddleOCR model integration.
 # //remarks: No provider is baked into the executable. The Base URL, API key, and model list are
 # //remarks: deliberately NOT hard-coded: a build must work against any OpenAI-compatible provider, so the
 # //remarks: URL field starts empty and the model dropdown only ever holds what that provider's own
@@ -718,17 +734,9 @@ class Window(QMainWindow):
   brand.addWidget(title); brand.addWidget(subtitle); brand.addStretch()
   self.header_connection=QLabel('● Not connected'); self.header_connection.setObjectName('connectionBadge')
   brand.addWidget(self.header_connection); shell.addLayout(brand)
-  tabs=QTabWidget()
+  self.tabs=QTabWidget(); self.tabs.setTabPosition(QTabWidget.West)
   page=QWidget(); v=QVBoxLayout(page); v.setContentsMargins(6,8,6,6); v.setSpacing(9)
-  self.connection_summary=QFrame(); self.connection_summary.setObjectName('connectionSummary')
-  summary=QHBoxLayout(self.connection_summary); summary.setContentsMargins(10,6,8,6); summary.setSpacing(8)
-  self.connection_summary_text=QLabel('Connection required. Enter your provider details below.')
-  self.connection_summary_text.setTextFormat(Qt.PlainText)
-  summary.addWidget(self.connection_summary_text,1)
-  self.change_connection_button=QPushButton('Change')
-  self.change_connection_button.clicked.connect(lambda: self.set_connection_editor_visible(True))
-  summary.addWidget(self.change_connection_button)
-  self.connection_summary.hide(); v.addWidget(self.connection_summary)
+  control_panel=QWidget(); cv=QVBoxLayout(control_panel); cv.setContentsMargins(6,8,6,6); cv.setSpacing(9)
 
   self.connection_card=QFrame(); self.connection_card.setObjectName('connectionCard')
   connection=QVBoxLayout(self.connection_card); connection.setContentsMargins(14,10,14,10); connection.setSpacing(8)
@@ -740,9 +748,12 @@ class Window(QMainWindow):
   self.connect_button.setToolTip('Confirm the Base URL and API key. Pressing this fetches the full model list from the provider and, once the key is proved, enables the Model dropdown.')
   self.connect_button.clicked.connect(self.confirm_connection)
   connection_heading.addWidget(self.connect_button)
-  self.hide_connection_button=QPushButton('Hide')
-  self.hide_connection_button.clicked.connect(lambda: self.set_connection_editor_visible(False))
-  connection_heading.addWidget(self.hide_connection_button); connection.addLayout(connection_heading)
+  # //remarks: The editor has its own tab, so the old Hide button becomes a way back to the work area. Hiding the
+  # //remarks: card itself would leave an empty Control Panel and no way to edit the provider at all.
+  self.back_to_translate_button=QPushButton('Back to Translate')
+  self.back_to_translate_button.setToolTip('Return to the Translate tab. The connection summary stays visible in Translation Settings.')
+  self.back_to_translate_button.clicked.connect(self.show_translate_tab)
+  connection_heading.addWidget(self.back_to_translate_button); connection.addLayout(connection_heading)
 
   provider_row=QHBoxLayout(); provider_row.setSpacing(8)
   provider_label=QLabel('Saved providers'); provider_label.setObjectName('fieldLabel')
@@ -786,16 +797,66 @@ class Window(QMainWindow):
   self.connect_status=QLabel(); self.connect_status.setTextFormat(Qt.PlainText)
   connect_row=QHBoxLayout(); connect_row.setSpacing(0); connect_row.addWidget(self.connect_status,1)
   connection.addLayout(connect_row)
-  v.addWidget(self.connection_card)
+  cv.addWidget(self.connection_card)
 
-  self.lang=QComboBox(); self.lang.addItems(LANGS)
+  # //remarks: The default output language is a Control Panel setting rather than a per-batch choice: it seeds the
+  # //remarks: target-language picker on the Translate tab, so a user who always translates into one language sets it
+  # //remarks: once. Both pickers carry the same bilingual labels and the same internal language keys.
+  self.default_lang=QComboBox()
+  for name in LANGS: self.default_lang.addItem(LANGUAGE_LABELS[name],name)
+  self.default_lang.setToolTip('Default output language. Every batch starts with this target language; the Translate tab can still change it for the current batch.')
+  self.default_lang.currentIndexChanged.connect(lambda _: self.on_default_language_changed())
+  default_card=QFrame(); default_card.setObjectName('settingsCard')
+  default_layout=QVBoxLayout(default_card); default_layout.setContentsMargins(14,10,14,10); default_layout.setSpacing(8)
+  default_title=QLabel('Default Output Language'); default_title.setObjectName('cardTitle')
+  default_layout.addWidget(default_title)
+  default_group=QVBoxLayout(); default_group.setSpacing(4)
+  default_label=QLabel('Output language'); default_label.setObjectName('fieldLabel')
+  default_group.addWidget(default_label); default_group.addWidget(self.default_lang)
+  default_layout.addLayout(default_group)
+  self.default_language_note=QLabel('Used as the target language whenever a batch starts.')
+  self.default_language_note.setObjectName('fieldLabel'); self.default_language_note.setWordWrap(True)
+  default_layout.addWidget(self.default_language_note)
+  cv.addWidget(default_card)
+
+  self.default_export_format=QComboBox()
+  for key,label in EXPORT_FORMATS: self.default_export_format.addItem(label,key)
+  self.default_export_format.setToolTip('Default export format. The Export dialog opens with this format selected, but you can choose another format each time.')
+  self.default_export_format.currentIndexChanged.connect(lambda _: self.on_default_export_format_changed())
+  export_card=QFrame(); export_card.setObjectName('settingsCard')
+  export_layout=QVBoxLayout(export_card); export_layout.setContentsMargins(14,10,14,10); export_layout.setSpacing(8)
+  export_title=QLabel('Default Export Format'); export_title.setObjectName('cardTitle')
+  export_layout.addWidget(export_title)
+  export_group=QVBoxLayout(); export_group.setSpacing(4)
+  export_label=QLabel('Format used first in the Export dialog'); export_label.setObjectName('fieldLabel')
+  export_group.addWidget(export_label); export_group.addWidget(self.default_export_format)
+  export_layout.addLayout(export_group)
+  export_note=QLabel('You can still choose PDF, Word (DOCX), or Plain Text (TXT) when exporting.')
+  export_note.setObjectName('fieldLabel'); export_note.setWordWrap(True); export_layout.addWidget(export_note)
+  cv.addWidget(export_card); cv.addStretch()
+
+  self.lang=QComboBox()
+  for name in LANGS: self.lang.addItem(LANGUAGE_LABELS[name],name)
   self.api_status=QLabel(); self.image_status=QLabel()
   for pill in (self.api_status,self.image_status): pill.setTextFormat(Qt.PlainText)
   self.set_api_status(None); self.set_image_status(None)
 
+  # //remarks: The collapsed connection summary stays in Translation Settings: it reports the provider state at a
+  # //remarks: glance, while the editor that changes it lives on the Control Panel tab.
+  self.connection_summary=QFrame(); self.connection_summary.setObjectName('connectionSummary')
+  summary=QHBoxLayout(self.connection_summary); summary.setContentsMargins(10,6,8,6); summary.setSpacing(8)
+  self.connection_summary_text=QLabel('Connection required. Enter your provider details in the Control Panel.')
+  self.connection_summary_text.setTextFormat(Qt.PlainText); self.connection_summary_text.setWordWrap(True)
+  summary.addWidget(self.connection_summary_text,1)
+  self.change_connection_button=QPushButton('Change')
+  self.change_connection_button.setToolTip('Open the Control Panel to edit the provider connection.')
+  self.change_connection_button.clicked.connect(self.open_control_panel)
+  summary.addWidget(self.change_connection_button)
+
   self.job_card=QFrame(); self.job_card.setObjectName('jobCard')
   job=QVBoxLayout(self.job_card); job.setContentsMargins(14,10,14,10); job.setSpacing(8)
   job_title=QLabel('Translation Settings'); job_title.setObjectName('cardTitle'); job.addWidget(job_title)
+  job.addWidget(self.connection_summary)
   job_controls=QHBoxLayout(); job_controls.setSpacing(10)
   language_group=QVBoxLayout(); language_group.setSpacing(4)
   language_label=QLabel('Target language'); language_label.setObjectName('fieldLabel')
@@ -866,14 +927,16 @@ class Window(QMainWindow):
   self.ready_label=QLabel('Ready  ●'); self.ready_label.setObjectName('readyStatus'); footer.addWidget(self.ready_label)
   v.addLayout(footer)
 
-  tabs.addTab(page,'Translator')
+  self.translate_page=page; self.control_panel_page=control_panel
+  self.tabs.addTab(page,'Translate')
+  self.tabs.addTab(control_panel,'Control Panel')
   about=QWidget(); av=QVBoxLayout(about)
   about_details=QLabel(f'<h2>BlueTL</h2><p>Version v{APP_VERSION}</p><p>Published by borneanwingz.fl</p><p>Author: Blue-Wingz @ facedesk</p><p><a href="https://github.com/BorneanWingz/PrivateRepoReadmes/blob/main/BlueTLReadme.md">Readme</a></p>')
   about_details.setOpenExternalLinks(True); av.addWidget(about_details)
   av.addStretch()
   support=QLabel('If you enjoy my app, please consider to <a href="https://buymeacoffee.com/DrLwSii">buy me a cuppa</a>!')
   support.setOpenExternalLinks(True); support.setWordWrap(True); av.addWidget(support)
-  tabs.addTab(about,'About')
+  self.tabs.addTab(about,'About')
   w.setStyleSheet('''
    QWidget { color: #172033; font-family: "Segoe UI"; font-size: 9pt; }
    QMainWindow { background: #f1f3f7; }
@@ -882,11 +945,12 @@ class Window(QMainWindow):
    QLabel#connectionBadge { color: #16763a; background: #e4f4e8; border: 1px solid #a7d7b4; border-radius: 15px; padding: 5px 9px; min-height: 30px; font-weight: 600; }
    QLabel#cardTitle { font-size: 12pt; font-weight: 700; }
    QLabel#fieldLabel { color: #475467; font-size: 8pt; font-weight: 600; }
-   QFrame#connectionCard, QFrame#jobCard { background: #ffffff; border: 1px solid #e1e5eb; border-radius: 12px; }
-   QFrame#connectionSummary { background: #ffffff; border: 1px solid #dfe4eb; border-radius: 10px; }
+   QFrame#connectionCard, QFrame#jobCard, QFrame#settingsCard { background: #ffffff; border: 1px solid #e1e5eb; border-radius: 12px; }
+   QFrame#connectionSummary { background: #f8fafc; border: 1px solid #dfe4eb; border-radius: 10px; }
    QTabWidget::pane { border: 0; background: transparent; }
-   QTabBar::tab { background: #e7e9ee; padding: 6px 14px; border-top-left-radius: 6px; border-top-right-radius: 6px; }
-   QTabBar::tab:selected { background: #ffffff; color: #173b8f; font-weight: 600; border-bottom: 2px solid #2563eb; }
+   QTabBar::tab { background: transparent; color: #475467; min-width: 116px; padding: 11px 14px; margin: 2px 7px 2px 0; border-radius: 7px; text-align: left; }
+   QTabBar::tab:hover { background: #e7eaf0; color: #172033; }
+   QTabBar::tab:selected { background: #ffffff; color: #173b8f; font-weight: 600; border-left: 3px solid #2563eb; }
    QLineEdit, QComboBox { background: #ffffff; border: 1px solid #cbd2dc; border-radius: 6px; padding: 4px 7px; min-height: 20px; }
    QPushButton { background: #f8f9fb; border: 1px solid #c8ced8; border-radius: 7px; padding: 5px 10px; min-height: 30px; }
    QPushButton:hover { background: #edf1f7; }
@@ -909,13 +973,18 @@ class Window(QMainWindow):
    QProgressBar::chunk { background: #2563eb; border-radius: 4px; }
    QLabel#readyStatus { color: #475467; }
   ''')
-  shell.addWidget(tabs)
+  shell.addWidget(self.tabs)
   self.setCentralWidget(w)
   self.update_actions()
+ def show_translate_tab(self):
+  self.update_connection_summary(); self.tabs.setCurrentWidget(self.translate_page)
+ def open_control_panel(self):
+  self.tabs.setCurrentWidget(self.control_panel_page)
  def set_connection_editor_visible(self,visible):
-  self.connection_card.setVisible(visible)
-  self.connection_summary.setVisible(not visible)
-  if not visible: self.update_connection_summary()
+  # //remarks: Kept as the connection workflow's single navigation hook. A successful Save returns to Translate;
+  # //remarks: asking to show the editor opens Control Panel instead of hiding widgets on separate pages.
+  if visible: self.open_control_panel()
+  else: self.show_translate_tab()
  def set_refresh_enabled(self,enabled):
   self.refresh_button.setEnabled(enabled)
   self.job_refresh_button.setEnabled(enabled)
@@ -930,7 +999,7 @@ class Window(QMainWindow):
    self.header_connection.setText('● Connected')
    self.header_connection.setStyleSheet('color:#16763a;background:#e4f4e8;border:1px solid #a7d7b4;border-radius:15px;padding:5px 9px;min-height:30px;font-weight:600;')
   else:
-   self.connection_summary_text.setText('Connection required. Enter your provider details below.')
+   self.connection_summary_text.setText('Connection required. Enter your provider details in the Control Panel.')
    self.header_connection.setText('● Not connected')
    self.header_connection.setStyleSheet('color:#667085;background:#f2f4f7;border:1px solid #d0d5dd;border-radius:15px;padding:5px 9px;min-height:30px;font-weight:600;')
  def load(self):
@@ -952,7 +1021,12 @@ class Window(QMainWindow):
    # //remarks: The tick box state is restored before the list is rebuilt, so the dropdown comes back filtered
    # //remarks: exactly as the user left it instead of flashing the full list first.
    self.free_only.blockSignals(True); self.free_only.setChecked(bool(d.get('free_only',False))); self.free_only.blockSignals(False)
-   self.lang.setCurrentText(d.get('language',LANGS[0]))
+   saved_export=export_format_key(d.get('default_export_format','pdf'))
+   self.default_export_format.blockSignals(True); self.default_export_format.setCurrentIndex(self.default_export_format.findData(saved_export)); self.default_export_format.blockSignals(False)
+   saved_language=language_key(d.get('default_language',d.get('language',LANGS[0])))
+   language_index=self.default_lang.findData(saved_language)
+   self.default_lang.blockSignals(True); self.default_lang.setCurrentIndex(language_index if language_index>=0 else 0); self.default_lang.blockSignals(False)
+   self.apply_default_language()
    # //remarks: Restore the last fetched model list before the network is asked again, so a tester who is
    # //remarks: offline (or whose provider is slow) still sees their own provider's models straight away.
    cache=d.get('models')
@@ -1087,7 +1161,7 @@ class Window(QMainWindow):
   else:
    old=self.profiles.get(profile_key(url)) if isinstance(self.profiles,dict) else None
    cipher=old.get('api_key','') if old and isinstance(old.get('api_key'),str) else ''
-  data={'url':url,'model':self.model.currentText().strip(),'language':self.lang.currentText(),'api_key':cipher,'free_only':self.free_only.isChecked(),'last_dir':self.last_dir,'models':self.model_cache[:500],'providers':dict(self.profiles) if isinstance(self.profiles,dict) else {}}
+  data={'url':url,'model':self.model.currentText().strip(),'language':self.lang.currentData(),'default_language':self.default_lang.currentData(),'default_export_format':self.default_export_format.currentData(),'api_key':cipher,'free_only':self.free_only.isChecked(),'last_dir':self.last_dir,'models':self.model_cache[:500],'providers':dict(self.profiles) if isinstance(self.profiles,dict) else {}}
   # //remarks: The active provider also lives in the provider map, so switching away and back restores its own key,
   # //remarks: model list, and verified state instead of the last one written. A provider is only recorded as verified
   # //remarks: while it is still the confirmed connection and the key that was proved is the key on screen.
@@ -1625,6 +1699,28 @@ class Window(QMainWindow):
    QMessageBox.information(self,'Nothing to import',f'No JPG, JPEG, PNG, WebP, PSD, ZIP, RAR, or 7Z files were found in:\n{folder}')
    return
   self.load_images(selected,folder)
+ def apply_default_language(self):
+  # //remarks: The Control Panel default is copied into the Translate target at the start of each batch; the target
+  # //remarks: picker remains available for a one-off change after that.
+  index=self.lang.findData(self.default_lang.currentData())
+  if index>=0: self.lang.setCurrentIndex(index)
+ def on_default_language_changed(self):
+  if not hasattr(self,'lang'): return
+  self.apply_default_language()
+  if self.restoring: return
+  try: self.save()
+  except Exception as e: self.status.setText(f'Could not save settings: {e}')
+ def on_default_export_format_changed(self):
+  # //remarks: Only the pre-selection in the Export dialog changes here. The dialog keeps all three filters, so a
+  # //remarks: user can export one chapter as Word and the next as PDF without touching this setting again.
+  if self.restoring: return
+  try: self.save()
+  except Exception as e: self.status.setText(f'Could not save settings: {e}')
+ def export_defaults(self):
+  # //remarks: The remembered format drives both the dialog's initial filter and its suggested file name, so the
+  # //remarks: name and the filter agree the moment the dialog opens instead of being corrected after a save.
+  fmt=export_format_key(self.default_export_format.currentData())
+  return fmt,f'translation{EXPORT_EXTENSIONS[fmt]}',EXPORT_FILTERS[fmt]
  def load_images(self,selected,last_dir):
   # //remarks: One path for both import choices: the picked files or the scanned folder go through the same
   # //remarks: expand_inputs() step, so name ordering, archive extraction and PSD flattening behave identically.
@@ -1635,6 +1731,9 @@ class Window(QMainWindow):
   try: self.save()
   except Exception as e: note=f' (Settings not saved: {e})'
   self.paths=self.expand_inputs(selected)
+  # //remarks: Every new batch starts from the Control Panel default output language, so a one-off target chosen
+  # //remarks: for the previous batch never leaks into the next import.
+  self.apply_default_language()
   # //remarks: A new import starts a fresh batch. Clear the previous project's OCR and translation rows
   # //remarks: so Translate all runs OCR for the newly selected images instead of reusing old rows.
   self.rows=[]
@@ -1962,7 +2061,8 @@ class Window(QMainWindow):
   if not self.url.text() or not self.key.text() or not self.model.currentText(): QMessageBox.warning(self,'API settings required','Enter Base URL, API key, and model name.'); return None
   self.save(); return OpenAI(base_url=self.url.text().rstrip('/'),api_key=self.key.text())
  def translate(self,text,client):
-  prof={'English':'natural conversational English','Bahasa Melayu':'natural Malaysian Malay, not Indonesian or textbook Malay','Simplified Chinese':'natural Mainland Chinese Simplified Chinese','Traditional Chinese':'natural Taiwanese Traditional Chinese'}[self.lang.currentText()]
+  target=self.lang.currentData() or language_key(self.lang.currentText())
+  prof={'English':'natural conversational English','Bahasa Melayu':'natural Malaysian Malay, not Indonesian or textbook Malay','Simplified Chinese':'natural Mainland Chinese Simplified Chinese','Traditional Chinese':'natural Taiwanese Traditional Chinese','Korean':'natural conversational Korean'}[target]
   prompt=f'Translate this Japanese manga text into {prof}. Preserve tone, emotion, politeness, slang, humour, and implied meaning. Return only the translation, with no notes or explanation.\\n\\nJapanese:\\n{text}'
   selected=self.model.currentText(); candidates=self.candidates(); last=None; self.last_model=''
   for model in candidates:
@@ -2139,8 +2239,11 @@ class Window(QMainWindow):
   self.sync()
   if not self.rows:
    QMessageBox.information(self,'Nothing to export','Import images and click Recognise OCR first.'); return
-  filters='PDF document (*.pdf);;Word document (*.docx);;Plain text (*.txt)'
-  p,chosen=QFileDialog.getSaveFileName(self,'Export translation','translation.pdf',filters)
+  # //remarks: The Control Panel default only pre-selects the dialog: the initial file name, the initial filter and
+  # //remarks: the full filter list are passed together, so the user still picks the format for this export and Qt
+  # //remarks: keeps the name in step with whichever filter they end on.
+  default_fmt,default_name,default_filter=self.export_defaults()
+  p,chosen=QFileDialog.getSaveFileName(self,'Export translation',default_name,EXPORT_FILTER_LIST,default_filter)
   if not p: return
   # //remarks: Trust the selected filter, then fall back to the extension the user typed. A name typed with a
   # //remarks: different extension is corrected so the writer always matches the file on disk.
@@ -2148,7 +2251,7 @@ class Window(QMainWindow):
   if '(*.docx)' in chosen: fmt='docx'
   elif '(*.txt)' in chosen: fmt='txt'
   elif '(*.pdf)' in chosen: fmt='pdf'
-  else: fmt={'.docx':'docx','.txt':'txt','.pdf':'pdf'}.get(target.suffix.lower(),'pdf')
+  else: fmt={'.docx':'docx','.txt':'txt','.pdf':'pdf'}.get(target.suffix.lower(),default_fmt)
   if target.suffix.lower()!=f'.{fmt}': target=target.with_suffix(f'.{fmt}')
   try:
    if fmt=='txt': self.write_txt(target)

@@ -23,6 +23,7 @@ OpenAI-compatible API provider, and exports TXT, DOCX, or PDF results.
 - Users are responsible for obtaining and configuring their own providers and API keys.
 - Settings are saved in `%APPDATA%\BlueTL\config.json`.
 - API keys are protected with Windows DPAPI and are never stored as plaintext.
+- Output is machine-generated and may be wrong; review it before you rely on it.
 
 ## Quick Start (Windows Portable)
 
@@ -32,6 +33,17 @@ OpenAI-compatible API provider, and exports TXT, DOCX, or PDF results.
 
 
 **This app is not signed with Windows certificate, as with most self-developed executables, so Windows or antivirus software may show a false-positive warning.**
+
+## Machine Translation Disclaimer
+
+**BlueTL produces machine translations. The output is generated automatically by OCR and
+an AI language model, so it can be inaccurate, incomplete, or misleading, and it may
+misread names, jokes, cultural references, sound effects, or implied meaning.**
+
+**Review and edit every line before publishing, redistributing, or relying on it. You use
+this software and its output at your own risk. The author accepts no responsibility or
+liability for errors, mistranslations, or any loss arising from use of the software or its
+output.**
 
 ## Features
 
@@ -98,11 +110,14 @@ eligible for translation again.
 
 ## Interface
 
-The Translator tab has a Connection card and a Job card. The Job card contains target
-language, model refresh, API status, image status, and the primary Import, Recognise OCR,
-Translate all, and Stop actions. Test API, Export, and row-editing actions are grouped below.
-The About tab shows version and author information and links to the public README and
-optional [donation page](https://buymeacoffee.com/DrLwSii).
+The left navigation contains Translate, Control Panel, and About. Translate keeps the compact
+provider summary inside Translation Settings alongside model refresh, API status, image status,
+and the primary Import, Recognise OCR, Translate all, and Stop actions. Test API, Export, and
+row-editing actions are grouped below. Control Panel contains the full provider connection editor
+and the default output-language and export-format pickers. The export dialog remains fully selectable
+for each export; the saved format is only the initial selection. About shows version and author
+information and links to
+the public README and optional [donation page](https://buymeacoffee.com/DrLwSii).
 
 
 ## Run from source

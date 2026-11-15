@@ -10,6 +10,7 @@ This document lists the changelog of BlueTL and what is inside a released build.
 
 ### Version v1.0.4
 
+- Added bilingual target-language picker labels for English, Bahasa Malaysia, Simplified Chinese 简体中文, Traditional Chinese 繁體中文, and Korean 한국어. Local Manga OCR remains Japanese-focused in BlueTL; Korean OCR is an AzureTL-specific feature.
 - Obsolete builds now open the newest BlueTL GitHub release in the user's default browser after the blocking notice is dismissed and before the executable closes, so the replacement download is immediately available.
 - If the browser cannot be opened, the release URL is shown for manual use before the obsolete build closes.
 - Fixed the translation table painting over its text: added explicit

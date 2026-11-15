@@ -683,6 +683,10 @@ check('Refresh models shares the Model row', wl.refresh_button.parent() is row_w
 check('Model row holds the picker, the button and the free-only box (picker leftmost)', row_widget.layout().count() == 3 and row_widget.layout().itemAt(0).widget() is wl.model and row_widget.layout().itemAt(2).widget() is wl.free_only, str(row_widget.layout().count()))
 check('Save label is exact', wl.connect_button.text() == 'Save', repr(wl.connect_button.text()))
 tabs = wl.findChild(bluetl.QTabWidget)
+check('navigation tabs are on the left', tabs.tabPosition() == bluetl.QTabWidget.West)
+check('navigation labels are Translate, Control Panel and About', [tabs.tabText(i) for i in range(tabs.count())] == ['Translate','Control Panel','About'], str([tabs.tabText(i) for i in range(tabs.count())]))
+check('connection editor is in Control Panel', wl.connection_card.parentWidget() is wl.control_panel_page)
+check('collapsed connection summary stays in Translation Settings', wl.connection_summary.parentWidget() is wl.job_card)
 about = tabs.widget(next(i for i in range(tabs.count()) if tabs.tabText(i) == 'About'))
 about_layout = about.layout()
 about_details = about_layout.itemAt(0).widget()
@@ -692,6 +696,34 @@ check('About support link is below a stretch and opens the cuppa page', about_la
 check('OCR button uses British spelling', wl.ocr_button.text() == 'Recognise OCR', repr(wl.ocr_button.text()))
 check('table header uses British spelling', wl.table.horizontalHeaderItem(2).text() == 'Recognised text', wl.table.horizontalHeaderItem(2).text())
 check('status hint uses British spelling', 'Recognise OCR' in wl.status.text(), wl.status.text())
+expected_language_labels=['English','Bahasa Malaysia','Simplified Chinese 简体中文','Traditional Chinese 繁體中文','Korean 한국어']
+check('language picker uses bilingual labels in the requested order', [wl.lang.itemText(i) for i in range(wl.lang.count())] == expected_language_labels, str([wl.lang.itemText(i) for i in range(wl.lang.count())]))
+check('language picker keeps stable internal language keys', [wl.lang.itemData(i) for i in range(wl.lang.count())] == bluetl.LANGS, str([wl.lang.itemData(i) for i in range(wl.lang.count())]))
+check('Control Panel default-language picker uses the same labels', [wl.default_lang.itemText(i) for i in range(wl.default_lang.count())] == expected_language_labels)
+wl.default_lang.setCurrentIndex(wl.default_lang.findData('Korean'))
+check('default-language picker seeds the Translate target', wl.lang.currentData() == 'Korean', str(wl.lang.currentData()))
+check('default language is persisted separately', json.loads(bluetl.CFG.read_text(encoding='utf-8')).get('default_language') == 'Korean')
+expected_export_labels=['PDF','Word (DOCX)','Plain Text (TXT)']
+check('Control Panel export-format picker has all formats', [wl.default_export_format.itemText(i) for i in range(wl.default_export_format.count())] == expected_export_labels)
+wl.default_export_format.setCurrentIndex(wl.default_export_format.findData('docx'))
+check('default export format is persisted', json.loads(bluetl.CFG.read_text(encoding='utf-8')).get('default_export_format') == 'docx')
+check('default export format sets initial filename and filter', wl.export_defaults() == ('docx','translation.docx','Word document (*.docx)'))
+check('export dialog still offers every format', bluetl.EXPORT_FILTER_LIST == 'PDF document (*.pdf);;Word document (*.docx);;Plain text (*.txt)') 
+# The Korean target must be rendered in the prompt rather than silently falling back to another language.
+wl.lang.setCurrentIndex(wl.lang.findData('Korean'))
+class PromptCapture:
+    class Chat:
+        class Completions:
+            def create(self, **kwargs):
+                PromptCapture.last = kwargs
+                return type('Reply', (), {'choices': [type('Choice', (), {'message': type('Message', (), {'content': '번역'})()})()]})()
+        completions = Completions()
+    chat = Chat()
+PromptCapture.last = {}
+wl.stop_requested = False
+wl.candidates = lambda: ['test-model']
+wl.translate('こんにちは', PromptCapture())
+check('Korean translation prompt requests conversational Korean', 'conversational Korean' in PromptCapture.last['messages'][1]['content'])
 US_SPELLINGS = ('Recognize', 'Recognized', 'recognize', 'recognized', 'humor', 'Humor', 'behavior', 'color ', 'catalog ')
 visible = [wl.connect_button.text(), wl.refresh_button.text(), wl.ocr_button.text(), wl.add_button.text(),
            wl.delete_button.text(), wl.free_only.text(), wl.status.text(), wl.connect_status.text(),
