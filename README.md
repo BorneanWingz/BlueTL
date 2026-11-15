@@ -1,6 +1,6 @@
 # BlueTL — Manga Translation Desktop App
 
-[![Version](https://img.shields.io/badge/version-v1.0.4-magenta)](https://github.com/BorneanWingz/BlueTL/blob/main/BUILD.md)
+[![Version](https://img.shields.io/badge/version-v0.1.5-magenta)](https://github.com/BorneanWingz/BlueTL/blob/main/BUILD.md)
 [![Platform](https://img.shields.io/badge/platform-Windows-blue)]()
 [![License](https://img.shields.io/badge/license-MIT%20core%20%2F%20GPL--3.0%20component-green)](LICENSE.md)
 
@@ -156,7 +156,22 @@ provider model names do not automatically provide downloadable local weights.
 
 ## Version history
 
-**Current version: v1.0.4**
+**Current version: v0.1.5**
+
+### v0.1.5
+
+Changes made from 15 November 2026 at 00:00 through this release:
+
+- Added left-side navigation with **Translate**, **Control Panel**, and **About**; renamed
+  **Translator** to **Translate**.
+- Moved provider configuration into Control Panel while retaining its compact status summary
+  inside Translation Settings.
+- Added persisted default output-language and export-format pickers. Export still offers PDF,
+  DOCX, and TXT every time; the default only controls the initial selection and file extension.
+- Added interruptible OCR and translation with a **Stop** button that preserves completed work.
+- Added a consolidated reminder when free tokens, credits, quotas, or request limits are exhausted.
+- Changed Import to explicit file/folder choices and kept BlueTL folder imports to one flat folder.
+- Added bilingual target-language labels and expanded automated regression coverage.
 
 ### v1.0.4
 
@@ -197,5 +212,5 @@ with GPL-3.0 and provide the complete corresponding source. See [LICENSE.md](LIC
 
 ---
 
-*BlueTL · Version v1.0.4 · Author: Blue-Wingz @ facedesk · Published by borneanwingz.fl*
+*BlueTL · Version v0.1.5 · Author: Blue-Wingz @ facedesk · Published by borneanwingz.fl*
 

@@ -84,7 +84,7 @@ CERT_NOTE='The provider certificate is valid for {days} more day(s).'
 # //remarks: MAX_SKIPPED_VERSIONS releases behind may keep running (the user can hold the update), but a build
 # //remarks: that is further behind is obsolete and refuses to start. The user is never nagged twice in one
 # //remarks: launch, and a failed or offline check must never block the app - it simply skips the reminder.
-APP_VERSION='1.0.4'
+APP_VERSION='0.1.5'
 RELEASES_URL='https://api.github.com/repos/BorneanWingz/BlueTL/releases?per_page=30'
 RELEASE_PAGE_URL='https://github.com/BorneanWingz/BlueTL/releases/tag/{tag}'
 MAX_SKIPPED_VERSIONS=2

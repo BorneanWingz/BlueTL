@@ -188,6 +188,7 @@ def wait_idle(window, timeout=25):
 w = bluetl.Window(); w.model_timer.stop(); w.update_poll.stop()
 # //remarks: Version ordering drives the update gate, and an obsolete build must acknowledge its popup before the
 # //remarks: exact newest release page is launched and the window closes.
+check('release identifier is v0.1.5', bluetl.APP_VERSION == '0.1.5', bluetl.APP_VERSION)
 check('newer releases are sorted numerically and de-duplicated', bluetl.newer_releases('1.0.4',['v1.0.5','v1.0.10','v1.0.5','v1.0.3']) == ['v1.0.10','v1.0.5'])
 mb_calls.clear(); browser_calls.clear(); obsolete_events=[]
 original_critical = bluetl.QMessageBox.critical

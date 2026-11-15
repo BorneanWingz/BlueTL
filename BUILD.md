@@ -1,12 +1,37 @@
 # BlueTL — Build and Release Notes
 
-**Current version: v1.0.4**
+**Current version: v0.1.5**
 
 This document lists the changelog of BlueTL and what is inside a released build.
 
 ---
 
 ## 1. Release history
+
+### Version v0.1.5
+
+Changes made from 15 November 2026 at 00:00 through this release:
+
+- Replaced the top tab strip with modern left-side navigation containing **Translate**,
+  **Control Panel**, and **About**, and renamed **Translator** to **Translate**.
+- Moved the full provider Connection editor to **Control Panel** while keeping a compact
+  connection summary inside **Translation Settings** on the Translate page.
+- Added a **Default Output Language** picker to Control Panel. The setting is saved and seeds
+  each new batch while the Translate picker remains available for one-off changes.
+- Added a **Default Export Format** picker for PDF, Word (DOCX), or Plain Text (TXT). It sets
+  the Export dialog's initial filter and file extension without removing the user's ability to
+  select another format for an individual export.
+- Added a **Stop** action for OCR and translation batches. Completed rows are preserved when a
+  batch is stopped, and later rows remain available for retry.
+- Added explicit handling for exhausted free tokens, credits, quotas, and request limits, with
+  one clear reminder listing affected fallback models instead of repeated generic errors.
+- Reworked Import into explicit file and folder choices. BlueTL accepts one flat folder at a
+  time and explains that nested sub-folders are outside the free-edition boundary.
+- Added bilingual target-language labels for English, Bahasa Malaysia, Simplified Chinese
+  简体中文, Traditional Chinese 繁體中文, and Korean 한국어. Local Manga OCR remains
+  Japanese-focused; Korean OCR remains AzureTL-specific.
+- Expanded offscreen regression coverage for navigation, Control Panel ownership, persisted
+  defaults, export preselection and override behavior, stopping, quota reminders, and imports.
 
 ### Version v1.0.4
 
