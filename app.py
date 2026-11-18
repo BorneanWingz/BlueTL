@@ -395,6 +395,82 @@ class ModelListLoader(threading.Thread):
   self.list_error=str(transport[0]) if transport else (str(first) if first is not None else 'model list request failed')
   if last and self.list_error and not transport and last not in self.list_error: self.list_error=f'{self.list_error} (also tried {last})'
 
+# //remarks: OCR worker runs in a QThread so the GUI stays responsive while pages are recognised.
+# //remarks: It emits progress, page_done, finished, and error signals back to the main thread.
+class OCRWorker(QThread):
+  progress = Signal(int, int, str)      # done, total, label
+  page_done = Signal(list, str, int)    # page_rows, page_name, page_num
+  finished = Signal(list, list, str)    # all_rows, empty_pages, status_msg
+  error = Signal(str)                   # error message
+
+  def __init__(self, paths, model_dir, detector_path, review_dir):
+    super().__init__()
+    self.paths = paths
+    self.model_dir = model_dir
+    self.detector_path = detector_path
+    self.review_dir = review_dir
+    self._stop_requested = False
+
+  def stop(self):
+    self._stop_requested = True
+
+  def run(self):
+    try:
+      from manga_ocr import MangaOcr
+      from comic_text_detector.inference import ComicTextDetector
+      import torch
+      try:
+        torch.set_num_threads(min(4, os.cpu_count() or 1))
+      except Exception:
+        pass
+      detector = ComicTextDetector(str(self.detector_path))
+      engine = MangaOcr(str(self.model_dir))
+      all_rows = []
+      empty_pages = []
+      for index, path in enumerate(self.paths, 1):
+        if self._stop_requested:
+          break
+        page = _page_number(Path(path).name, index)
+        page_name = Path(path).name
+        try:
+          img = open_page_image(path)
+          crops = _text_crops(img, detector)
+          if not crops:
+            empty_pages.append(page_name)
+            self.progress.emit(index - 1, len(self.paths), f'OCR file {index}/{len(self.paths)}: {page_name} (page {page}, 0 region(s))')
+            continue
+          self.progress.emit(index - 1, len(self.paths), f'OCR file {index}/{len(self.paths)}: {page_name} (page {page}, {len(crops)} region(s))')
+          page_rows = []
+          panel = 0
+          for region, (box, crop) in enumerate(crops, 1):
+            if self._stop_requested:
+              break
+            self.progress.emit(index - 1, len(self.paths), f'OCR file {index}/{len(self.paths)}, region {region}/{len(crops)}')
+            if _is_blank(crop):
+              continue
+            text = engine(crop).strip()
+            if text:
+              panel += 1
+              crop_path = str(Path(self.review_dir) / f'p{page:03d}_p{panel:03d}.png')
+              try:
+                crop.save(crop_path)
+              except (OSError, ValueError):
+                crop_path = ''
+              reason = _suspicion(crop, text)
+              page_rows.append(Row(page, panel, text, crop=crop_path, review='CHECK' if reason else '', reason=reason))
+          if page_rows:
+            self.page_done.emit(page_rows, page_name, page)
+            all_rows.extend(page_rows)
+        except (OSError, ValueError) as e:
+          empty_pages.append(f'{page_name} (unreadable: {e})')
+          continue
+      status_msg = f'OCR completed: {len(all_rows)} text region(s) across {len(self.paths)} page(s). Review before translating.'
+      if self._stop_requested:
+        status_msg = f'OCR stopped: {len(all_rows)} text region(s) kept from the pages recognised so far.'
+      self.finished.emit(all_rows, empty_pages, status_msg)
+    except Exception as e:
+      self.error.emit(f'{type(e).__name__}: {e}\n\nOCR model path: {self.model_dir}\nDetector model path: {self.detector_path}')
+
 # //remarks: Bundled asset resolution. Assets sit next to the source checkout when running from source and
 # //remarks: under _MEIPASS inside the PyInstaller bundle, so one helper keeps both layouts correct.
 def asset_path(*parts):
