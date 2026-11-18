@@ -115,8 +115,8 @@ eligible for translation again.
 ## Interface
 
 The left navigation contains Translate, Control Panel, and About. Each page has its own icon
-and a horizontal label, and the arrow at the bottom of the sidebar collapses it to icons only
-(labels stay in the tooltips), giving the width back to the page area. Translate keeps the compact
+and a horizontal label. Use **<<** at the bottom of the sidebar to collapse it to icons only
+(labels stay in the tooltips), and **>>** to expand it again. Translate keeps the compact
 provider summary inside Translation Settings alongside model refresh, API status, image status,
 and the primary Import, Recognise OCR, Translate all, and Stop actions. Test API, Export, and
 row-editing actions are grouped below. Control Panel contains the full provider connection editor
