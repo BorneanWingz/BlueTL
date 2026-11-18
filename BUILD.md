@@ -1,6 +1,6 @@
 # BlueTL — Build and Release Notes
 
-**Current version: v0.1.5**
+**Current version: v0.1.6**
 
 This document lists the changelog of BlueTL and what is inside a released build.
 
@@ -8,12 +8,22 @@ This document lists the changelog of BlueTL and what is inside a released build.
 
 ## 1. Release history
 
-### Version v0.1.5
+### Version v0.1.6
 
-Changes made from 15 November 2026 at 00:00 through this release:
+- **OCR moved to a background QThread** — the main window stays fully responsive while pages are recognised. Users can scroll the table, resize the window, and press **Stop** at any time. Recognised rows appear incrementally as each page finishes.
+- Stop button now calls `worker.stop()` for immediate OCR cancellation (previously only honoured between pages/regions).
+- Model memory (~500 MB for Torch + detector + MangaOCR) is released via `release_ocr_models()` after the batch ends, instead of being held while reviewing/translating.
+- Added cleanup in `load_images()` to stop any running OCR worker when a new batch is imported.
+
+### Version v0.1.5
 
 - Replaced the top tab strip with modern left-side navigation containing **Translate**,
   **Control Panel**, and **About**, and renamed **Translator** to **Translate**.
+- Rebuilt the navigation as a collapsible sidebar: each page carries its own icon with a
+  horizontal label, and the arrow toggle shrinks the panel to icons only so the page area
+  regains the width.
+- The About tab now links to the repository's `README.md` on GitHub instead of the
+  PrivateRepoReadmes copy.
 - Moved the full provider Connection editor to **Control Panel** while keeping a compact
   connection summary inside **Translation Settings** on the Translate page.
 - Added a **Default Output Language** picker to Control Panel. The setting is saved and seeds

@@ -1791,6 +1791,7 @@ class Window(QMainWindow):
   # //remarks: the recognised rows can be reviewed, corrected or extended before translating. Translate all
   # //remarks: runs the same OCR automatically when no rows have been recognised for the batch yet.
   self.ocr()
+
  def ocr(self):
   if not self.paths:
    QMessageBox.information(self,'No images','Import one or more manga images first.'); return

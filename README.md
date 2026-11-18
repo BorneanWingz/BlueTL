@@ -1,6 +1,6 @@
 # BlueTL — Manga Translation Desktop App
 
-[![Version](https://img.shields.io/badge/version-v0.1.5-magenta)](https://github.com/BorneanWingz/BlueTL/blob/main/BUILD.md)
+[![Version](https://img.shields.io/badge/version-v0.1.6-magenta)](https://github.com/BorneanWingz/BlueTL/blob/main/BUILD.md)
 [![Platform](https://img.shields.io/badge/platform-Windows-blue)]()
 [![License](https://img.shields.io/badge/license-MIT%20core%20%2F%20GPL--3.0%20component-green)](LICENSE.md)
 
@@ -30,6 +30,10 @@ OpenAI-compatible API provider, and exports TXT, DOCX, or PDF results.
 1. Download the latest release archive from the [Releases](https://github.com) page and extract the entire folder.
 2. Run `BlueTL.exe` (no installation required).
 3. Enter your OpenAI-compatible **Base URL** and **API key**, then press **Save**.
+
+## Responsive OCR (v0.1.6+)
+
+OCR now runs on a background thread. The window stays fully responsive while pages are being recognised — you can scroll the table, resize the window, or press **Stop** at any time. Completed rows appear incrementally as each page finishes. Model memory (~500 MB) is released automatically after the batch ends.
 
 
 **This app is not signed with Windows certificate, as with most self-developed executables, so Windows or antivirus software may show a false-positive warning.**
@@ -110,7 +114,9 @@ eligible for translation again.
 
 ## Interface
 
-The left navigation contains Translate, Control Panel, and About. Translate keeps the compact
+The left navigation contains Translate, Control Panel, and About. Each page has its own icon
+and a horizontal label, and the arrow at the bottom of the sidebar collapses it to icons only
+(labels stay in the tooltips), giving the width back to the page area. Translate keeps the compact
 provider summary inside Translation Settings alongside model refresh, API status, image status,
 and the primary Import, Recognise OCR, Translate all, and Stop actions. Test API, Export, and
 row-editing actions are grouped below. Control Panel contains the full provider connection editor
@@ -156,7 +162,12 @@ provider model names do not automatically provide downloadable local weights.
 
 ## Version history
 
-**Current version: v0.1.5**
+**Current version: v0.1.6**
+
+### v0.1.6
+
+- **OCR runs on a background thread** — the UI stays fully responsive during recognition. You can scroll the table, resize the window, and press **Stop** at any time. Rows appear incrementally as each page finishes. Model memory (~500 MB) is released automatically after the batch ends.
+- Stop button now interrupts OCR immediately (previously only between pages).
 
 ### v0.1.5
 
