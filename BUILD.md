@@ -1,6 +1,6 @@
 # BlueTL — Build and Release Notes
 
-**Current version: v0.1.6**
+**Current version: v0.1.7**
 
 This document lists the changelog of BlueTL and what is inside a released build.
 
@@ -8,12 +8,21 @@ This document lists the changelog of BlueTL and what is inside a released build.
 
 ## 1. Release history
 
+### Version v0.1.7
+
+- Updated Translate and Control Panel layouts with summaries and model controls for two translators.
+- Translator 2 can be disabled with `---`; its column is hidden and omitted from exports while disabled.
+  Both translators can use the same provider, but must select different models.
+- Translate all runs the enabled translators in sequence, skips completed or flagged rows, and preserves results on Stop.
+- OCR runs in a separate process; recognised rows appear incrementally while the table remains scrollable.
+- Batch translation requests run in a background thread. Stop takes effect after the current model load, OCR step, or API request.
+- The OCR process exits after the batch so its model and native-library memory can be reclaimed.
+- Import and batch-changing actions are disabled while work is running.
+- Fixed the comparison-provider reset and included Windows executable version metadata.
+
 ### Version v0.1.6
 
-- **OCR moved to a background QThread** — the main window stays fully responsive while pages are recognised. Users can scroll the table, resize the window, and press **Stop** at any time. Recognised rows appear incrementally as each page finishes.
-- Stop button now calls `worker.stop()` for immediate OCR cancellation (previously only honoured between pages/regions).
-- Model memory (~500 MB for Torch + detector + MangaOCR) is released via `release_ocr_models()` after the batch ends, instead of being held while reviewing/translating.
-- Added cleanup in `load_images()` to stop any running OCR worker when a new batch is imported.
+- Documented the intended responsive OCR interface.
 
 ### Version v0.1.5
 

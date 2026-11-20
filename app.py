@@ -1,4 +1,4 @@
-import sys, json, os, re, base64, ctypes, shutil, tempfile, zipfile, time, threading, socket, ssl, urllib.request, urllib.error, urllib.parse, webbrowser
+import sys, json, os, re, base64, ctypes, shutil, tempfile, zipfile, time, threading, multiprocessing, queue, socket, ssl, urllib.request, urllib.error, urllib.parse, webbrowser
 from pathlib import Path
 
 os.environ.setdefault('HF_HUB_OFFLINE','1')
@@ -34,7 +34,7 @@ def unprotect(value):
 from dataclasses import dataclass
 from openai import OpenAI
 from docx import Document
-from PySide6.QtWidgets import QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QFrame,QLineEdit,QComboBox,QPushButton,QFileDialog,QTableWidget,QTableWidgetItem,QMessageBox,QLabel,QHeaderView,QStackedWidget,QProgressBar,QCheckBox,QMenu,QToolButton,QButtonGroup,QStyle,QSizePolicy
+from PySide6.QtWidgets import QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QFrame,QLineEdit,QComboBox,QPushButton,QFileDialog,QTableWidget,QTableWidgetItem,QMessageBox,QLabel,QHeaderView,QStackedWidget,QProgressBar,QCheckBox,QMenu,QToolButton,QButtonGroup,QStyle,QSizePolicy,QScrollArea
 from PySide6.QtCore import Qt,QTimer
 from PySide6.QtGui import QIcon
 
@@ -72,6 +72,7 @@ FREE_MODEL_TOKEN='free'
 # //remarks: Saved-provider picker entries. The verified tick follows the British "proved/verified" wording used in
 # //remarks: the status line, and the placeholder keeps index 0 free so itemData(0) can never look like a provider.
 PLACEHOLDER_PROVIDER='Select a saved provider...'
+NO_SECOND_MODEL='---'
 PROVIDER_VERIFIED=chr(0x2714)+' '
 PROVIDER_UNVERIFIED=chr(0x2014)+' '
 # //remarks: One wording for the certificate note, so the status tooltip and the fetch message cannot drift apart.
@@ -84,7 +85,7 @@ CERT_NOTE='The provider certificate is valid for {days} more day(s).'
 # //remarks: MAX_SKIPPED_VERSIONS releases behind may keep running (the user can hold the update), but a build
 # //remarks: that is further behind is obsolete and refuses to start. The user is never nagged twice in one
 # //remarks: launch, and a failed or offline check must never block the app - it simply skips the reminder.
-APP_VERSION='0.1.5'
+APP_VERSION='0.1.7'
 RELEASES_URL='https://api.github.com/repos/BorneanWingz/BlueTL/releases?per_page=30'
 RELEASE_PAGE_URL='https://github.com/BorneanWingz/BlueTL/releases/tag/{tag}'
 MAX_SKIPPED_VERSIONS=2
@@ -168,7 +169,7 @@ def remember_profile(data,url,key_cipher,models=None,verified=None,model=None):
  data['providers']=profiles
  return data
 @dataclass
-class Row: page:int; panel:int; jp:str; tr:str=''; crop:str=''; review:str=''; reason:str=''
+class Row: page:int; panel:int; jp:str; tr:str=''; tr2:str=''; crop:str=''; review:str=''; reason:str=''
 
 # //remarks: Raised inside a batch loop when the user presses Stop. It is not an error: the caller keeps
 # //remarks: whatever was already finished and reports a stop instead of showing a failure dialog.
@@ -659,6 +660,88 @@ def _name_key(value):
   # //remarks: even positions and integers at odd ones, so every comparison stays type-safe.
   return [int(p) if p.isascii() and p.isdigit() else p for p in re.split(r'(\d+)',str(value).lower())]
 
+def check_ocr_dependencies():
+ checks=[('manga_ocr','manga-ocr'),('transformers','transformers'),('torch','torch'),('torchvision','torchvision'),('cv2','opencv-python-headless'),('pyclipper','pyclipper'),('shapely','shapely'),('torchsummary','torchsummary'),('unidic_lite','unidic-lite')]
+ failures=[]
+ for module,package in checks:
+  try: __import__(module)
+  except Exception as e: failures.append(f'{package}: {type(e).__name__}: {e}')
+ if failures: raise ImportError('Local OCR dependencies failed to load:\n'+'\n'.join(failures))
+ from transformers import ViTImageProcessor
+ if ViTImageProcessor is None: raise ImportError('transformers.ViTImageProcessor is unavailable')
+
+def ocr_worker(paths,review_dir,events,cancel):
+ try:
+  check_ocr_dependencies()
+  import unidic_lite
+  dict_dir=Path(unidic_lite.DICDIR)
+  if not (dict_dir/'version').is_file():
+   raise FileNotFoundError(f'Japanese tokenizer dictionary missing: {dict_dir / "version"}')
+  from manga_ocr import MangaOcr
+  import torch
+  torch.set_num_threads(min(4,os.cpu_count() or 1))
+  model_dir=asset_path('manga-ocr-model')
+  if not (model_dir/'vocab.txt').is_file():
+   raise FileNotFoundError(f'Manga OCR model is incomplete. Expected vocab.txt at: {model_dir / "vocab.txt"}')
+  if cancel.is_set(): raise StopRequested()
+  engine=MangaOcr(str(model_dir))
+  empty_pages=[]
+  for index,path in enumerate(paths,1):
+   if cancel.is_set(): raise StopRequested()
+   page=_page_number(Path(path).name,index)
+   events.put(('progress',index-1,len(paths),f'Detecting text on file {index}/{len(paths)}: {Path(path).name}'))
+   try:
+    with open_page_image(path) as img:
+     boxes=detect_text_regions(img)
+     if not boxes: empty_pages.append(Path(path).name)
+     panel=0
+     for region,box in enumerate(boxes,1):
+      if cancel.is_set(): raise StopRequested()
+      events.put(('progress',index-1,len(paths),f'OCR file {index}/{len(paths)}, region {region}/{len(boxes)}'))
+      with img.crop(box) as crop:
+       if _is_blank(crop): continue
+       text=engine(crop).strip()
+       if text:
+        panel+=1
+        crop_path=str(Path(review_dir)/f'p{page:03d}_f{index:03d}_n{panel:03d}.png')
+        crop.save(crop_path)
+        reason=_suspicion(crop,text)
+        events.put(('row',page,panel,text,crop_path,reason))
+   except (OSError,ValueError) as e:
+    empty_pages.append(f'{Path(path).name} (unreadable: {e})')
+  if cancel.is_set(): raise StopRequested()
+  events.put(('finished','completed',empty_pages))
+ except StopRequested:
+  events.put(('finished','stopped',[]))
+ except Exception as e:
+  events.put(('error',type(e).__name__,str(e)))
+
+def translation_worker(todo,client,target,candidates,events,cancel):
+ profiles={'English':'natural conversational English','Bahasa Melayu':'natural Malaysian Malay, not Indonesian or textbook Malay','Simplified Chinese':'natural Mainland Chinese Simplified Chinese','Traditional Chinese':'natural Taiwanese Traditional Chinese','Korean':'natural conversational Korean'}
+ try:
+  for index,(row_index,text,page,panel) in enumerate(todo,1):
+   if cancel.is_set(): raise StopRequested()
+   events.put(('progress',index-1,len(todo),f'Translating row {index}/{len(todo)} (page {page}, panel {panel})...'))
+   prompt=f'Translate this Japanese manga text into {profiles[target]}. Preserve tone, emotion, politeness, slang, humour, and implied meaning. Return only the translation, with no notes or explanation.\n\nJapanese:\n{text}'
+   last=None
+   for model in candidates:
+    if cancel.is_set(): raise StopRequested()
+    try:
+     response=client.chat.completions.create(model=model,messages=[{'role':'system','content':'You are a professional manga translator.'},{'role':'user','content':prompt}])
+     result=(response.choices[0].message.content or '').strip()
+     events.put(('row',row_index,result,model))
+     break
+    except Exception as e:
+     last=e
+     if quota_exceeded(e): events.put(('quota',model,str(e)))
+   else: raise RuntimeError(f'All configured models failed. Last error: {last}')
+  if cancel.is_set(): raise StopRequested()
+  events.put(('finished','completed'))
+ except StopRequested:
+  events.put(('finished','stopped'))
+ except Exception as e:
+  events.put(('error',str(e)))
+
 NAV_WIDTH = 240
 NAV_COLLAPSED_WIDTH = 64
 
@@ -672,6 +755,11 @@ class Window(QMainWindow):
    self.stop_requested=False
    # //remarks: True only while a batch is in flight, so the Stop button is clickable exactly then.
    self.busy=False
+   self.ocr_process=None; self.ocr_events=None; self.ocr_cancel=None
+   self.ocr_continuation=None; self.ocr_closing=False
+   self.ocr_poll=QTimer(self); self.ocr_poll.setInterval(50); self.ocr_poll.timeout.connect(self.poll_ocr)
+   self.translation_thread=None; self.translation_events=None; self.translation_cancel=None
+   self.translation_poll=QTimer(self); self.translation_poll.setInterval(50); self.translation_poll.timeout.connect(self.poll_translation)
    # //remarks: (model, error) pairs whose free allowance or request limit ran out during the current batch,
    # //remarks: collected so one reminder popup can list every affected model when the batch ends.
    self.quota_limits_seen=[]
@@ -699,6 +787,12 @@ class Window(QMainWindow):
    self.model_pending=''
    self.model_poll=QTimer(self); self.model_poll.setInterval(100)
    self.model_poll.timeout.connect(self.poll_models)
+   self.second_provider_key=''; self.second_model=''
+   self.url2_url=''; self.url2_key=''; self.api_verified2=''
+   self.model_cache2=[]
+   self.model2_loader=None; self.model2_deadline=0.0; self.model2_request_key=''
+   self.model2_poll=QTimer(self); self.model2_poll.setInterval(100)
+   self.model2_poll.timeout.connect(self.poll_models2)
    # //remarks: Base URL whose list was last fetched, so a redundant re-fetch (for example typing and then
    # //remarks: undoing the edit) is skipped and auto-discovery stays quiet.
    self.refreshed=''
@@ -789,18 +883,38 @@ class Window(QMainWindow):
   model_row_widget=QWidget()
   model_row=QHBoxLayout(model_row_widget); model_row.setContentsMargins(0,0,0,0); model_row.setSpacing(8)
   model_row.addWidget(self.model,1); model_row.addWidget(self.refresh_button); model_row.addWidget(self.free_only)
+  translator1_label=QLabel('Translator 1'); translator1_label.setObjectName('cardTitle')
   model_label=QLabel('Model'); model_label.setObjectName('fieldLabel')
-  fields.addWidget(model_label,2,0,1,2); fields.addWidget(model_row_widget,3,0,1,2)
+  fields.addWidget(translator1_label,2,0,1,2); fields.addWidget(model_label,3,0,1,2); fields.addWidget(model_row_widget,4,0,1,2)
   self.refresh_button.hide()
   connection.addLayout(fields)
   self.url.textEdited.connect(lambda _: self.on_connection_edited())
   self.key.textEdited.connect(lambda _: self.on_connection_edited())
   self.url.textChanged.connect(lambda _: self.on_url_changed())
 
-  self.connect_status=QLabel(); self.connect_status.setTextFormat(Qt.PlainText)
+  self.connect_status=QLabel(); self.connect_status.setTextFormat(Qt.PlainText); self.connect_status.setWordWrap(True)
   connect_row=QHBoxLayout(); connect_row.setSpacing(0); connect_row.addWidget(self.connect_status,1)
   connection.addLayout(connect_row)
   cv.addWidget(self.connection_card)
+
+  translator2_card=QFrame(); translator2_card.setObjectName('settingsCard')
+  translator2=QVBoxLayout(translator2_card); translator2.setContentsMargins(14,10,14,10); translator2.setSpacing(6)
+  translator2_title=QLabel('Translator 2'); translator2_title.setObjectName('cardTitle'); translator2.addWidget(translator2_title)
+  provider2_label=QLabel('Saved provider'); provider2_label.setObjectName('fieldLabel'); translator2.addWidget(provider2_label)
+  self.provider2=QComboBox()
+  self.provider2.setToolTip('Choose the verified provider for Translator 2. It may be the same as Translator 1.')
+  self.provider2.activated.connect(self.on_provider_chosen2); translator2.addWidget(self.provider2)
+  model2_label=QLabel('Model'); model2_label.setObjectName('fieldLabel'); translator2.addWidget(model2_label)
+  model2_row=QHBoxLayout()
+  self.model2=QComboBox(); self.model2.setEditable(True)
+  self.model2.addItem(NO_SECOND_MODEL); self.model2.setEnabled(False)
+  self.model2.currentTextChanged.connect(self.save_second_model)
+  self.model2.lineEdit().editingFinished.connect(self.save_second_model)
+  self.free_only2=QCheckBox('Free models only')
+  self.free_only2.toggled.connect(self.on_free_only2_toggled)
+  model2_row.addWidget(self.model2,1); model2_row.addWidget(self.free_only2); translator2.addLayout(model2_row)
+  self.api_status2=QLabel('Translator 2 not configured'); self.api_status2.setTextFormat(Qt.PlainText)
+  translator2.addWidget(self.api_status2); cv.addWidget(translator2_card)
 
   # //remarks: The default output language is a Control Panel setting rather than a per-batch choice: it seeds the
   # //remarks: target-language picker on the Translate tab, so a user who always translates into one language sets it
@@ -859,19 +973,26 @@ class Window(QMainWindow):
   self.job_card=QFrame(); self.job_card.setObjectName('jobCard')
   job=QVBoxLayout(self.job_card); job.setContentsMargins(14,10,14,10); job.setSpacing(8)
   job_title=QLabel('Translation Settings'); job_title.setObjectName('cardTitle'); job.addWidget(job_title)
-  job.addWidget(self.connection_summary)
-  job_controls=QHBoxLayout(); job_controls.setSpacing(10)
-  language_group=QVBoxLayout(); language_group.setSpacing(4)
-  language_label=QLabel('Target language'); language_label.setObjectName('fieldLabel')
-  language_group.addWidget(language_label); language_group.addWidget(self.lang)
-  job_controls.addLayout(language_group,1)
+  first_title=QLabel('Translator 1'); first_title.setObjectName('cardTitle'); job.addWidget(first_title)
   self.job_refresh_button=QPushButton('Refresh models')
   self.job_refresh_button.setToolTip(self.refresh_button.toolTip())
   self.job_refresh_button.setEnabled(False)
   self.job_refresh_button.clicked.connect(lambda: self.refresh_models(manual=True))
-  job_controls.addWidget(self.job_refresh_button)
-  job_controls.addWidget(self.api_status); job_controls.addWidget(self.image_status)
-  job.addLayout(job_controls)
+  self.job_refresh_button2=QPushButton('Refresh models')
+  self.job_refresh_button2.setToolTip(self.refresh_button.toolTip())
+  self.job_refresh_button2.setEnabled(False)
+  self.job_refresh_button2.clicked.connect(lambda: self.refresh_models(manual=True, second=True))
+  self.test_api_button=QPushButton('Test API'); self.test_api_button.clicked.connect(self.test_api)
+  first_row=QHBoxLayout(); first_row.addWidget(self.connection_summary,1); first_row.addWidget(self.job_refresh_button)
+  first_row.addStretch(); first_row.addWidget(self.test_api_button); first_row.addWidget(self.api_status); job.addLayout(first_row)
+  second_title=QLabel('Translator 2'); second_title.setObjectName('cardTitle'); job.addWidget(second_title)
+  self.connection_summary2=QFrame(); self.connection_summary2.setObjectName('connectionSummary')
+  summary2=QHBoxLayout(self.connection_summary2); summary2.setContentsMargins(10,6,8,6)
+  self.connection_summary_text2=QLabel('Translator 2 disabled'); self.connection_summary_text2.setTextFormat(Qt.PlainText)
+  summary2.addWidget(self.connection_summary_text2,1)
+  change2=QPushButton('Change'); change2.clicked.connect(self.open_control_panel); summary2.addWidget(change2)
+  second_row=QHBoxLayout(); second_row.addWidget(self.connection_summary2,1); second_row.addWidget(self.job_refresh_button2)
+  second_row.addStretch(); job.addLayout(second_row)
 
   self.ocr_button=QPushButton('Recognise OCR')
   self.ocr_button.setToolTip('Recognise every text region on the imported images with the local OCR model. This spends no API tokens.')
@@ -888,6 +1009,7 @@ class Window(QMainWindow):
   self.import_button=import_button
   import_button.setToolTip('Import manga images or archives. Choose several files at once, or one folder.')
   translate_button=QPushButton('Translate all')
+  self.translate_button=translate_button
   translate_button.setObjectName('primaryAction')
   translate_button.clicked.connect(self.all)
   # //remarks: Stop sits beside Translate all and interrupts whichever batch is running - OCR or translation -
@@ -899,27 +1021,29 @@ class Window(QMainWindow):
   self.stop_button.clicked.connect(self.stop)
   self.stop_button.setEnabled(False)
   action_row=QHBoxLayout(); action_row.setSpacing(10)
-  import_button.setMinimumWidth(140); self.ocr_button.setMinimumWidth(180)
-  action_row.addWidget(import_button); action_row.addWidget(self.ocr_button); action_row.addWidget(translate_button,1); action_row.addWidget(self.stop_button)
+  second_row.addWidget(import_button); second_row.addWidget(self.image_status)
+  action_row.addWidget(self.ocr_button); action_row.addWidget(self.add_button); action_row.addWidget(self.delete_button); action_row.addWidget(translate_button,1); action_row.addWidget(self.stop_button)
   job.addLayout(action_row)
 
-  self.test_api_button=QPushButton('Test API'); self.test_api_button.clicked.connect(self.test_api)
   self.export_button=QPushButton('Export'); self.export_button.clicked.connect(self.export)
   self.export_button.setToolTip('Export the translation table. Choose TXT, DOCX, or PDF in the dialog that opens.')
-  utility_row=QHBoxLayout(); utility_row.addStretch()
-  for button in (self.test_api_button,self.export_button,self.add_button,self.delete_button):
-   utility_row.addWidget(button)
+  language_group=QVBoxLayout(); language_group.setSpacing(4)
+  language_label=QLabel('Target language'); language_label.setObjectName('fieldLabel')
+  language_group.addWidget(language_label); language_group.addWidget(self.lang)
+  utility_row=QHBoxLayout(); utility_row.addLayout(language_group,1); utility_row.addWidget(self.export_button)
   job.addLayout(utility_row); v.addWidget(self.job_card)
 
-  self.table=QTableWidget(0,5); self.table.setHorizontalHeaderLabels(['PAGE','PANEL','Recognised text','TRANSLATION','REVIEW'])
+  self.table=QTableWidget(0,6); self.table.setHorizontalHeaderLabels(['PAGE','PANEL','Recognised text','TRANSLATION','TRANSLATION 2','REVIEW'])
   self.table.setWordWrap(True); self.table.setAlternatingRowColors(True)
   self.table.setShowGrid(False); self.table.verticalHeader().setVisible(False)
   self.table.horizontalHeader().setSectionResizeMode(0,QHeaderView.ResizeToContents)
   self.table.horizontalHeader().setSectionResizeMode(1,QHeaderView.ResizeToContents)
   self.table.horizontalHeader().setSectionResizeMode(2,QHeaderView.Stretch)
   self.table.horizontalHeader().setSectionResizeMode(3,QHeaderView.Stretch)
-  self.table.horizontalHeader().setSectionResizeMode(4,QHeaderView.ResizeToContents)
+  self.table.horizontalHeader().setSectionResizeMode(4,QHeaderView.Stretch)
+  self.table.horizontalHeader().setSectionResizeMode(5,QHeaderView.ResizeToContents)
   self.table.horizontalHeader().sectionResized.connect(lambda *_: self._fit_rows())
+  self.model.currentTextChanged.connect(self.on_primary_model_changed)
   v.addWidget(self.table,1)
   self.progress=QProgressBar(); self.progress.setRange(0,1); self.progress.setValue(0)
   self.progress.setTextVisible(True); self.progress.setFormat('%v/%m'); self.progress.setMaximumHeight(18)
@@ -930,9 +1054,10 @@ class Window(QMainWindow):
   self.ready_label=QLabel('Ready  ●'); self.ready_label.setObjectName('readyStatus'); footer.addWidget(self.ready_label)
   v.addLayout(footer)
 
-  self.translate_page=page; self.control_panel_page=control_panel
+  control_scroll=QScrollArea(); control_scroll.setWidgetResizable(True); control_scroll.setFrameShape(QFrame.NoFrame); control_scroll.setWidget(control_panel)
+  self.translate_page=page; self.control_panel_page=control_scroll
   self.stack.addWidget(page)
-  self.stack.addWidget(control_panel)
+  self.stack.addWidget(control_scroll)
   about=QWidget(); av=QVBoxLayout(about)
   about_details=QLabel(f'<h2>BlueTL</h2><p>Version v{APP_VERSION}</p><p>Published by borneanwingz.fl</p><p>Author: Blue-Wingz @ facedesk</p><p><a href="https://github.com/BorneanWingz/BlueTL/blob/main/README.md">Readme</a></p>')
   about_details.setOpenExternalLinks(True); av.addWidget(about_details)
@@ -1075,6 +1200,10 @@ class Window(QMainWindow):
    # //remarks: without retyping a key. The rebuild itself happens after the handler, so it also runs on a first launch
    # //remarks: where there is no settings file at all.
    self.profiles=load_profiles(d)
+   self.second_provider_key=str(d.get('second_provider','')).strip()
+   if self.second_provider_key not in self.profiles: self.second_provider_key=''
+   self.second_model=str(d.get('second_model','')).strip()
+   self.free_only2.blockSignals(True); self.free_only2.setChecked(bool(d.get('free_only2',False))); self.free_only2.blockSignals(False)
    current_key=profile_key(self.url.text())
    if current_key and current_key not in self.profiles and self.url.text().strip():
     self.profiles[current_key]={'url':self.url.text().strip(),'api_key':d.get('api_key','') if isinstance(d.get('api_key'),str) else '','verified':False,'model':saved_model,'models':self.model_cache}
@@ -1097,6 +1226,9 @@ class Window(QMainWindow):
   # //remarks: The picker is built once, outside the handler, so a first launch and a damaged config both still show
   # //remarks: the placeholder instead of an empty combo box that looks broken.
   self.refresh_provider_list()
+  if self.second_provider_key:
+   self.on_provider_chosen2(self.provider2.currentIndex(),save=False,model_override=self.second_model)
+  self.update_second_view()
   # //remarks: A config is only "connected" when it already holds both a Base URL and a key, which happens after a
   # //remarks: previous Save. Restoring it lets a returning user see their models straight away without
   # //remarks: having to confirm again; a fresh or cleared config stays unconfirmed and the dropdown stays locked.
@@ -1168,19 +1300,6 @@ class Window(QMainWindow):
  def ocr_dependency_hint(self):
   return 'Install or repair dependencies with:\npython -m pip install -r requirements.txt\n\nPython: '+sys.executable
 
- def check_ocr_dependencies(self):
-  # //remarks: Import every module used by the local detector/OCR path before loading model weights. This
-  # //remarks: prevents a misleading generic dependency message and reports the exact failing module.
-  checks=[('manga_ocr','manga-ocr'),('transformers','transformers'),('torch','torch'),('torchvision','torchvision'),('cv2','opencv-python-headless'),('pyclipper','pyclipper'),('shapely','shapely'),('torchsummary','torchsummary'),('unidic_lite','unidic-lite')]
-  failures=[]
-  for module,package in checks:
-   try: __import__(module)
-   except Exception as e: failures.append(f'{package}: {type(e).__name__}: {e}')
-  if failures: raise ImportError('Local OCR dependencies failed to load:\n'+'\n'.join(failures))
-  from transformers import ViTImageProcessor
-  if ViTImageProcessor is None: raise ImportError('transformers.ViTImageProcessor is unavailable')
-
-
  def save(self):
   CFG.parent.mkdir(parents=True,exist_ok=True)
   # //remarks: Everything the user entered is stored, because nothing is hard-coded in the executable: the
@@ -1195,7 +1314,7 @@ class Window(QMainWindow):
   else:
    old=self.profiles.get(profile_key(url)) if isinstance(self.profiles,dict) else None
    cipher=old.get('api_key','') if old and isinstance(old.get('api_key'),str) else ''
-  data={'url':url,'model':self.model.currentText().strip(),'language':self.lang.currentData(),'default_language':self.default_lang.currentData(),'default_export_format':self.default_export_format.currentData(),'api_key':cipher,'free_only':self.free_only.isChecked(),'last_dir':self.last_dir,'models':self.model_cache[:500],'providers':dict(self.profiles) if isinstance(self.profiles,dict) else {}}
+  data={'url':url,'model':self.model.currentText().strip(),'language':self.lang.currentData(),'default_language':self.default_lang.currentData(),'default_export_format':self.default_export_format.currentData(),'api_key':cipher,'free_only':self.free_only.isChecked(),'last_dir':self.last_dir,'models':self.model_cache[:500],'providers':dict(self.profiles) if isinstance(self.profiles,dict) else {},'second_provider':self.second_provider_key,'second_model':self.second_model_value(),'free_only2':self.free_only2.isChecked()}
   # //remarks: The active provider also lives in the provider map, so switching away and back restores its own key,
   # //remarks: model list, and verified state instead of the last one written. A provider is only recorded as verified
   # //remarks: while it is still the confirmed connection and the key that was proved is the key on screen.
@@ -1210,10 +1329,15 @@ class Window(QMainWindow):
   tmp.write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding='utf-8')
   tmp.replace(CFG)
  def closeEvent(self,event):
+  if self.ocr_process is not None or self.translation_thread is not None:
+   self.ocr_closing=True
+   self.stop()
+   event.ignore()
+   return
   # //remarks: Pending discovery work (a queued debounce tick or an in-flight poll) would only start steps for a
   # //remarks: window that is already closing, and a live timer can keep the process alive, so both are stopped
   # //remarks: as part of shutdown.
-  self.model_timer.stop(); self.model_poll.stop()
+  self.model_timer.stop(); self.model_poll.stop(); self.model2_poll.stop()
   if hasattr(self,'update_poll'): self.update_poll.stop()
   try: self.save()
   except Exception as e: self.status.setText(f'Could not save settings: {e}')
@@ -1236,16 +1360,32 @@ class Window(QMainWindow):
   key=profile_key(url)
   index=self.provider.findData(key) if key else -1
   self.provider.blockSignals(True); self.provider.setCurrentIndex(index if index>=0 else 0); self.provider.blockSignals(False)
+ def select_provider2(self,url):
+  # //remarks: Same as select_provider but for the second provider picker
+  key=profile_key(url)
+  index=self.provider2.findData(key) if key else -1
+  self.provider2.blockSignals(True); self.provider2.setCurrentIndex(index if index>=0 else 0); self.provider2.blockSignals(False)
  def refresh_provider_list(self):
   # //remarks: Rebuild the saved-provider entries after a new provider is remembered or an existing one is proved.
   # //remarks: The selection is kept on the URL in the fields, so the picker never jumps to another provider.
   current=self.url.text()
   self.provider.blockSignals(True); self.provider.clear(); self.provider.addItem(PLACEHOLDER_PROVIDER)
+  # //remarks: Also populate the second provider picker
+  self.provider2.blockSignals(True); self.provider2.clear(); self.provider2.addItem(PLACEHOLDER_PROVIDER)
   for key in sorted(self.profiles,key=lambda k:self.profiles[k]['url'].lower()):
    entry=self.profiles[key]
-   self.provider.addItem((PROVIDER_VERIFIED+entry['url']) if entry.get('verified') else (PROVIDER_UNVERIFIED+entry['url']),key)
+   item_text=(PROVIDER_VERIFIED+entry['url']) if entry.get('verified') else (PROVIDER_UNVERIFIED+entry['url'])
+   self.provider.addItem(item_text,key)
+   self.provider2.addItem(item_text,key)
   self.provider.blockSignals(False)
+  self.provider2.blockSignals(False)
   self.select_provider(current)
+  self.select_provider2(self.second_provider_key)
+  if not self.second_provider_key:
+   key=profile_key(current)
+   if key in self.profiles and self.profiles[key].get('verified'):
+    self.select_provider2(key)
+    self.on_provider_chosen2(self.provider2.currentIndex(),save=False,model_override='')
  def on_provider_chosen(self,index):
   # //remarks: Switching providers is a two-step action like a fresh connect: the stored URL, key, and model list are
   # //remarks: filled in, the connection is marked unconfirmed, and then the list is re-fetched. The stored key is only
@@ -1271,6 +1411,137 @@ class Window(QMainWindow):
   self.connect_status.setStyleSheet('color:#b45309;padding:2px 2px;')
   self.connect_button.setEnabled(True)
   self.status.setText(f'Provider selected: {saved["url"]}. Press Save to fetch its model list.')
+ def on_provider_chosen2(self,index,save=True,model_override=None):
+  entry=self.provider2.itemData(index) if index>0 else None
+  if not entry:
+   self.select_provider2(self.second_provider_key)
+   return
+  saved=self.profiles.get(entry)
+  if not saved:
+   self.second_provider_key=''
+   self.select_provider2('')
+   self.set_second_provider()
+   return
+  self.second_provider_key=entry
+  self.url2_url=str(saved.get('url') or '')
+  self.url2_key=unprotect(saved.get('api_key',''))
+  self.api_verified2=entry if saved.get('verified') and self.url2_key else ''
+  self.model_cache2=list(saved.get('models') or [])
+  self.model2.setEnabled(bool(self.api_verified2))
+  self.job_refresh_button2.setEnabled(bool(self.api_verified2))
+  self.model2.blockSignals(True)
+  self.set_models2(self.model_cache2,keep_current=False)
+  chosen=str(model_override if model_override is not None else '').strip()
+  self.model2.setCurrentText(chosen or NO_SECOND_MODEL)
+  self.second_model=self.second_model_value()
+  self.model2.blockSignals(False)
+  if self.api_verified2:
+   self.set_api_status2(True,f'Previously verified provider: {self.url2_url}')
+  else:
+   detail='This saved provider has no usable verified API key. Reconnect and verify it in the Control Panel.'
+   self.set_api_status2(False,detail)
+  self.update_second_view()
+  if save:
+   try: self.save()
+   except Exception as e: self.status.setText(f'Could not save second provider: {e}')
+ def set_second_provider(self):
+  self.second_model=''
+  self.url2_url=''; self.url2_key=''; self.api_verified2=''; self.model_cache2=[]
+  self.model2.blockSignals(True); self.set_models2([],keep_current=False); self.model2.blockSignals(False)
+  self.model2.setEnabled(False); self.job_refresh_button2.setEnabled(False)
+  self.set_api_status2(None,'Choose a saved provider to enable comparison translation.')
+  self.update_second_view()
+ def set_api_status2(self,ok,detail=''):
+  text=f'Connected - {len(self.model_cache2)} model(s) available and API key verified.' if ok else ('Provider not verified' if ok is False else 'Translator 2 not configured')
+  colour='#1a7f37' if ok else ('#c62828' if ok is False else '#6b7280')
+  background='#e7f5eb' if ok else ('#fdecec' if ok is False else '#f2f4f7')
+  border='#b7dfc1' if ok else ('#f2b8b5' if ok is False else '#d0d5dd')
+  self.api_status2.setText(text)
+  self.api_status2.setStyleSheet(f'color:{colour};background:{background};border:1px solid {border};border-radius:15px;font-weight:600;padding:5px 8px;min-height:30px;')
+  self.api_status2.setToolTip(detail)
+ def set_models2(self,ids,keep_current=True):
+  current=self.second_model_value() if keep_current else ''
+  merged=filter_models(list(ids or [])+([current] if current else []),self.free_only2.isChecked())
+  if current and current not in merged: merged.append(current)
+  if self.same_translator_provider():
+   primary=self.model.currentText().strip()
+   merged=[value for value in merged if value!=primary or value==current]
+  blocked=self.model2.blockSignals(True)
+  self.model2.clear(); self.model2.addItem(NO_SECOND_MODEL); self.model2.addItems([value for value in merged if value!=NO_SECOND_MODEL])
+  self.model2.setCurrentText(current or NO_SECOND_MODEL)
+  self.model2.blockSignals(blocked)
+ def second_model_value(self):
+  value=self.model2.currentText().strip()
+  return '' if value==NO_SECOND_MODEL else value
+ def same_translator_provider(self):
+  return bool(self.second_provider_key and self.second_provider_key==profile_key(self.connected_url or self.url.text().strip()))
+ def duplicate_translator_models(self):
+  return bool(self.second_model_value() and self.same_translator_provider() and self.second_model_value()==self.model.currentText().strip())
+ def on_primary_model_changed(self,*args):
+  if not hasattr(self,'connection_summary_text'): return
+  self.update_connection_summary()
+  self.set_models2(self.model_cache2)
+  self.update_second_view()
+ def update_second_view(self):
+  value=self.second_model_value()
+  if hasattr(self,'table'): self.table.setColumnHidden(4,not bool(value))
+  if hasattr(self,'connection_summary_text2'):
+   self.connection_summary_text2.setText('Choose a different model for Translator 2' if self.duplicate_translator_models() else f'{self.url2_url} · {value}' if value and self.url2_url else 'Translator 2 disabled' if not value else 'Choose a verified provider for Translator 2')
+ def on_free_only2_toggled(self,checked):
+  self.set_models2(self.model_cache2)
+  self.save_second_model()
+ def save_second_model(self,*args):
+  if self.restoring: return
+  self.second_model=self.second_model_value()
+  self.update_second_view()
+  try: self.save()
+  except Exception as e: self.status.setText(f'Could not save second-provider model: {e}')
+ def refresh_models2(self,manual=False):
+  if self.model2_loader is not None:
+   if manual: self.status.setText('The second provider model-list refresh is already running.')
+   return
+  saved=self.profiles.get(self.second_provider_key)
+  if not saved or not self.url2_url or not self.url2_key:
+   if manual: QMessageBox.warning(self,'Second provider required','Choose a saved provider with a verified API key first.')
+   return
+  if self.api_verified2!=self.second_provider_key:
+   if manual: QMessageBox.warning(self,'API key not verified','Verify this provider in the Control Panel before refreshing its model list.')
+   return
+  self.job_refresh_button2.setEnabled(False)
+  self.api_status2.setToolTip(f'Fetching models from {self.url2_url}...')
+  loader=ModelListLoader(normalized_url(self.url2_url),self.url2_key)
+  self.model2_loader=loader; self.model2_deadline=time.monotonic()+30
+  self.model2_request_key=self.second_provider_key
+  if manual: self.status.setText(f'Fetching models for the second provider at {self.url2_url}...')
+  loader.start(); self.model2_poll.start()
+ def poll_models2(self):
+  loader=self.model2_loader
+  if loader is None:
+   self.model2_poll.stop(); return
+  if loader.is_alive() and time.monotonic()<self.model2_deadline: return
+  self.model2_poll.stop(); self.model2_loader=None
+  self.job_refresh_button2.setEnabled(bool(self.api_verified2==self.second_provider_key))
+  if self.model2_request_key!=self.second_provider_key: return
+  if loader.is_alive():
+   self.set_api_status2(True,'Model-list refresh timed out; the saved list is unchanged.')
+   self.status.setText('Second provider model-list refresh timed out; the cached list was kept.')
+   return
+  if loader.list_error:
+   self.set_api_status2(True,f'Model-list refresh failed: {loader.list_error}')
+   self.status.setText(f'Second provider model-list refresh failed: {loader.list_error}')
+   return
+  if loader.list_id:
+   self.model_cache2=list(loader.list_id[:500])
+   saved=self.profiles.get(self.second_provider_key)
+   if saved is not None:
+    saved['models']=self.model_cache2
+   self.model2.blockSignals(True); self.set_models2(self.model_cache2); self.model2.blockSignals(False)
+   try: self.save()
+   except Exception as e: self.status.setText(f'Models refreshed, but settings could not be saved: {e}')
+   else: self.status.setText(f'{len(self.model_cache2)} model(s) fetched for the second provider.')
+  else:
+   self.set_api_status2(True,'The provider returned no models; the cached list is unchanged.')
+   self.status.setText('The second provider returned no models; the cached list was kept.')
  def delete_provider(self):
   # //remarks: Removes the saved provider matching the Base URL on screen. If it is the active connection the fields,
   # //remarks: model list and verified state are cleared too, so nothing of the deleted provider remains in use.
@@ -1279,6 +1550,9 @@ class Window(QMainWindow):
    self.status.setText('No saved provider matches the Base URL on screen.'); return
   url=self.profiles[key]['url']
   del self.profiles[key]
+  if self.second_provider_key==key:
+   self.second_provider_key=''; self.second_model=''
+   self.set_second_provider()
   if self.fetched[0]==key: self.fetched=('','')
   if self.api_verified==key: self.api_verified=''
   self.restoring=True
@@ -1396,6 +1670,8 @@ class Window(QMainWindow):
   # //remarks: alone would let a wrong key look connected until the first translation failed.
   url=self.url.text().strip(); key=self.key.text().strip()
   self.update_connection_summary()
+  self.set_models2(self.model_cache2)
+  self.update_second_view()
   if self.same_connection(url,key):
    if profile_key(url)!=self.api_verified or not key:
     self.connect_button.setEnabled(False)
@@ -1446,7 +1722,10 @@ class Window(QMainWindow):
   self.refresh_provider_list()
   self.refreshed=''
   self.refresh_models(manual=True,url=normalized_url(url),key=key,verify_key=True)
- def refresh_models(self,manual=False,url=None,key=None,verify_key=False):
+ def refresh_models(self,manual=False,url=None,key=None,verify_key=False,second=False):
+  if second:
+   self.refresh_models2(manual=manual)
+   return
   # //remarks: Re-fetch the provider's model list from its /models endpoint and refresh the dropdown. The
   # //remarks: network work happens on a worker thread and this method only starts it; a small poll timer
   # //remarks: collects the result, so an unreachable host delays nothing and the window never freezes or runs
@@ -1561,6 +1840,7 @@ class Window(QMainWindow):
      self.status.setText(f'{len(self.model_cache)} model(s) fetched from {source}, but the API key was rejected: {detail}')
      if manual: QMessageBox.warning(self,'API key not verified',f'The model list was fetched from {source}, but testing the API key failed:\n\n{detail}\n\nCheck the key and press Save again.')
     self.save()
+    self.refresh_provider_list()
    elif manual:
     # //remarks: An empty but valid answer means the provider genuinely published no models; the current
     # //remarks: dropdown is left untouched and the tester can still type an ID by hand.
@@ -1632,11 +1912,21 @@ class Window(QMainWindow):
   # //remarks: OCR has run for the current batch, because a new row takes its page and panel number from the
   # //remarks: recognised rows around it, and it is enabled even when recognition found nothing so a batch
   # //remarks: can still be completed by hand. Deleting only needs a row that exists.
-  self.add_button.setEnabled(self.recognized)
-  self.delete_button.setEnabled(bool(self.rows))
+  self.add_button.setEnabled(self.recognized and not self.busy)
+  self.delete_button.setEnabled(bool(self.rows) and not self.busy)
+  self.import_button.setEnabled(not self.busy)
+  self.ocr_button.setEnabled(not self.busy)
+  self.translate_button.setEnabled(not self.busy)
+  self.test_api_button.setEnabled(not self.busy)
+  self.export_button.setEnabled(not self.busy)
+  self.control_panel_page.setEnabled(not self.busy)
+  self.provider2.setEnabled(not self.busy)
+  self.model2.setEnabled(not self.busy and bool(self.api_verified2))
+  self.lang.setEnabled(not self.busy)
   # //remarks: Stop is only meaningful while a batch is in flight, so it follows the same single flag the batch
   # //remarks: loops read. update_actions() is called from every path that changes that state.
   if hasattr(self,'stop_button'): self.stop_button.setEnabled(self.busy)
+  if hasattr(self,'stop2_button'): self.stop2_button.setEnabled(self.busy)
 
  def record_quota_limit(self,model,error):
   # //remarks: Remember each model whose free allowance ran out once, so the reminder at the end of the batch
@@ -1657,16 +1947,20 @@ class Window(QMainWindow):
    'Affected model(s):\n'+detail+'\n\n'
    'Pick another model, wait for the limit to reset, or press Translate all again to retry the remaining rows.')
   return True
- def ranked(self,selected):
+ def ranked(self,selected,model_widget=None):
   # //remarks: The retry order is built from whatever list is currently in the dropdown, so a tester's own
   # //remarks: provider models (discovery result or typed IDs) take part in the fallback chain. There is no
   # //remarks: seeded ID list any more: free models are recognised by the same "free" text search the tick box
   # //remarks: uses, and they lead the chain whenever they are present. The selected model is always tried
   # //remarks: first, then the remaining free models, then everything else the provider reported.
   live=[]
-  for i in range(self.model.count()):
-   value=self.model.itemText(i).strip()
-   if value and value not in live: live.append(value)
+  model_widget=model_widget or self.model
+  for i in range(model_widget.count()):
+   value=model_widget.itemText(i).strip()
+   if value and value!=NO_SECOND_MODEL and value not in live: live.append(value)
+  if self.same_translator_provider() and self.second_model_value():
+   other=self.model.currentText().strip() if model_widget is self.model2 else self.second_model_value()
+   live=[value for value in live if value!=other]
   leading=[m for m in live if is_free_model(m)]
   rest=[m for m in live if m not in leading]
   return ([selected] if selected else [])+[m for m in leading if m != selected]+[m for m in rest if m != selected]
@@ -1825,112 +2119,72 @@ class Window(QMainWindow):
   # //remarks: the recognised rows can be reviewed, corrected or extended before translating. Translate all
   # //remarks: runs the same OCR automatically when no rows have been recognised for the batch yet.
   self.ocr()
- def ocr(self):
+ def ocr(self,continuation=None):
+  if self.busy: return
   if not self.paths:
    QMessageBox.information(self,'No images','Import one or more manga images first.'); return
-  # //remarks: Resolve the bundled model paths once and keep them in scope for error messages.
-  model_dir=asset_path('manga-ocr-model')
-  detector_path=detector_model_path()
-  try:
-   self.check_ocr_dependencies()
-   # //remarks: unidic_lite supplies the MeCab dictionary used by Manga OCR's tokenizer.
-   # //remarks: Importing it first turns a missing dictionary into one clear message instead
-   # //remarks: of the misleading "Unable to load vocabulary from file" error.
-   try:
-    import unidic_lite
-    dict_dir=Path(unidic_lite.DICDIR)
-    if not (dict_dir/'version').is_file():
-     raise FileNotFoundError(f'MeCab dictionary missing: {dict_dir / "version"}')
-   except Exception as e:
-    raise RuntimeError(f'Japanese tokenizer dictionary (unidic_lite) is unavailable: {e}') from e
-   from manga_ocr import MangaOcr
-   if not model_dir.is_dir() or not (model_dir/'vocab.txt').is_file():
-    raise FileNotFoundError(f'Manga OCR model is incomplete. Expected vocab.txt at: {model_dir / "vocab.txt"}')
-   engine=MangaOcr(str(model_dir))
-   self.rows=[]
-   # //remarks: Every recognised region is stored as an image so a suspicious line can be compared with the
-   # //remarks: region it came from, and so the pair can be exported later as review material.
-   self.review_dir=tempfile.mkdtemp(prefix='bluetl_review_')
-   from PIL import Image
-   # //remarks: OCR can take a long time per page; a busy bar makes it clear the app is working. Both the
-   # //remarks: detector and Manga OCR run on the first page, so the label names both steps.
-   self.begin_busy('Detecting text and running OCR...')
-   # //remarks: Stop is clickable for the whole OCR phase, including the model load that happens before the
-   # //remarks: first page, because loading the detector and Manga OCR is itself a long step.
-   self.set_running(True)
-   # //remarks: Pages where the detector found no text are collected, so a page that produced no rows
-   # //remarks: is reported in the status line instead of looking like a silent success.
-   empty_pages=[]
-   for index,path in enumerate(self.paths,1):
-    # //remarks: The Stop button is honoured between pages, so pressing it never leaves a half-written row and
-    # //remarks: the rows recognised so far are kept for review.
-    if self.stop_requested: raise StopRequested()
-    # //remarks: The page number follows the file name, so "007.jpg" is reported as page 7 instead of
-    # //remarks: the position the file happens to have in the batch. A name without any digits falls
-    # //remarks: back to the batch position, so every row still gets a usable page number.
-    page=_page_number(Path(path).name,index)
-    # //remarks: Detect every text block on the page with comic-text-detector and recognise each one,
-    # //remarks: instead of the old single whole-page call that returned only one line per image.
-    try:
-     # //remarks: open_page_image flattens a .psd into a page raster before detection; every other format opens
-     # //remarks: directly. PSD pages therefore take the exact same detector/OCR path as a JPEG or PNG.
-     img=open_page_image(path)
-     crops=_text_crops(img)
-     if not crops: empty_pages.append(Path(path).name)
-     self.set_progress(index-1,len(self.paths),f'OCR file {index}/{len(self.paths)}: {Path(path).name} (page {page}, {len(crops)} region(s))')
-     panel=0
-     for region,(box,crop) in enumerate(crops,1):
-      # //remarks: A page can hold dozens of regions, so Stop is also honoured between regions instead of only
-      # //remarks: between pages.
-      if self.stop_requested: raise StopRequested()
-      self.set_progress(index-1,len(self.paths),f'OCR file {index}/{len(self.paths)}, region {region}/{len(crops)}')
-      # //remarks: Skip textless crops so the model cannot answer them with invented dialogue.
-      if _is_blank(crop): continue
-      text=engine(crop).strip()
-      if text:
-       panel+=1
-       # //remarks: Keep the crop beside the text and flag a suspicious result instead of trusting it. A
-       # //remarks: flagged row is visible in the Review column and is held back from translation until the
-       # //remarks: user approves it by clearing that cell.
-       crop_path=str(Path(self.review_dir)/f'p{page:03d}_f{index:03d}_n{panel:03d}.png')
-       try: crop.save(crop_path)
-       except (OSError,ValueError): crop_path=''
-       reason=_suspicion(crop,text)
-       self.rows.append(Row(page,panel,text,crop=crop_path,review='CHECK' if reason else '',reason=reason))
-    except (OSError,ValueError) as e:
-     # //remarks: One damaged image must not discard OCR results from every other page in the batch.
-     empty_pages.append(f'{Path(path).name} (unreadable: {e})')
-     continue
-   skipped=', '.join(empty_pages)
-   note=f' No text detected on page(s): {skipped}.' if empty_pages else ''
-   self.refresh(); self.end_progress(f'OCR completed: {len(self.rows)} text region(s) across {len(self.paths)} page(s). Review before translating.{note}')
-  except StopRequested:
-   # //remarks: A stop is not a failure: keep the regions already recognised, tell the user how far the batch
-   # //remarks: got, and let them translate or review what is there.
-   self.refresh(); self.end_progress(f'OCR stopped: {len(self.rows)} text region(s) kept from the pages recognised so far.')
-  except ImportError as e:
-   # //remarks: Do not hide the actual dependency that failed. The old generic message said only
-   # //remarks: "OCR is not installed", even when one detector dependency failed inside a frozen build.
-   self.end_progress('OCR dependency error.')
-   QMessageBox.critical(self,'OCR dependency error',f'{type(e).__name__}: {e}\n\n{self.ocr_dependency_hint()}')
-  except OSError as e:
-   # //remarks: Native DLL load failures are reported separately because Windows often raises OSError,
-   # //remarks: not ImportError, when a compiled dependency such as OpenCV or Torch cannot load.
-   self.end_progress('OCR native dependency error.')
-   QMessageBox.critical(self,'OCR native dependency error',f'{type(e).__name__}: {e}\n\nA compiled component of the local OCR could not load.\n\n{self.ocr_dependency_hint()}')
-  # //remarks: Report the resolved model path plus any dictionary path so failures are diagnosable.
-  except Exception as e:
+  if self.rows: self.sync()
+  ctx=multiprocessing.get_context('spawn')
+  events=ctx.Queue(); cancel=ctx.Event()
+  review_dir=tempfile.mkdtemp(prefix='bluetl_review_')
+  process=ctx.Process(target=ocr_worker,args=(list(self.paths),review_dir,events,cancel))
+  try: process.start()
+  except (OSError,RuntimeError) as e:
+   events.close()
+   QMessageBox.critical(self,'OCR failed',f'Could not start OCR process: {e}')
+   return
+  self.ocr_previous=(self.rows,self.recognized,self.review_dir)
+  self.rows=[]; self.refresh(); self.recognized=False; self.review_dir=review_dir
+  self.ocr_process=process; self.ocr_events=events; self.ocr_cancel=cancel
+  self.ocr_continuation=continuation; self.ocr_result=None
+  self.ocr_edit_triggers=self.table.editTriggers()
+  self.table.setEditTriggers(self.table.EditTrigger.NoEditTriggers)
+  self.set_running(True)
+  self.progress.setRange(0,0); self.progress.setFormat('Working...'); self.progress.setVisible(True)
+  self.status.setText('Loading text detection and OCR models...')
+  self.ocr_poll.start()
+
+ def poll_ocr(self):
+  process=self.ocr_process
+  if process is None: return
+  while True:
+   try: event=self.ocr_events.get_nowait()
+   except queue.Empty: break
+   if event[0]=='progress':
+    self.progress.setRange(0,max(1,event[2])); self.progress.setValue(event[1])
+    self.progress.setFormat('%v/%m'); self.status.setText(event[3])
+   elif event[0]=='row':
+    _,page,panel,text,crop,reason=event
+    self.rows.append(Row(page,panel,text,crop=crop,review='CHECK' if reason else '',reason=reason))
+    self.append_table_row(self.rows[-1])
+   else: self.ocr_result=event
+  if process.is_alive(): return
+  process.join()
+  self.ocr_poll.stop(); self.ocr_events.close()
+  self.ocr_process=None; self.ocr_events=None; self.ocr_cancel=None
+  self.table.setEditTriggers(self.ocr_edit_triggers)
+  result=self.ocr_result or ('error','WorkerExit',f'OCR process exited with code {process.exitcode} without a result.')
+  if process.exitcode:
+   result=('error','WorkerExit',f'OCR process exited with code {process.exitcode}.')
+  self.recognized=result[0]=='finished'
+  if result[0]=='error' and not self.rows:
+   self.rows,self.recognized,self.review_dir=self.ocr_previous
+   self.refresh()
+  self.ocr_previous=None
+  self.set_running(False)
+  if result[0]=='error':
    self.end_progress('OCR failed.')
-   QMessageBox.critical(self,'OCR failed',f'{type(e).__name__}: {e}\n\nOCR model path: {model_dir}\nDetector model path: {detector_path}')
-  finally:
-   # //remarks: The OCR step has now run for this batch whatever the outcome, so a batch that found no
-   # //remarks: text - or whose model failed to load - can still be finished by typing rows manually.
-   self.recognized=True
-   # //remarks: The batch is over, so the Stop button goes back to disabled.
-   self.set_running(False)
-   # //remarks: Drop the detector and its torch allocations now the batch is over. The next batch pays the
-   # //remarks: one-off reload instead of the app holding ~500 MB while the user reviews or translates.
-   release_ocr_models()
+   if not self.ocr_closing:
+    QMessageBox.critical(self,'OCR failed',f'{result[1]}: {result[2]}\n\nOCR model path: {asset_path("manga-ocr-model")}\nDetector model path: {detector_model_path()}\n\n{self.ocr_dependency_hint()}')
+  elif result[1]=='stopped' or self.stop_requested:
+   self.end_progress(f'OCR stopped: {len(self.rows)} text region(s) kept from the pages recognised so far.')
+  else:
+   note=f' No text detected on page(s): {", ".join(result[2])}.' if result[2] else ''
+   self.end_progress(f'OCR completed: {len(self.rows)} text region(s) across {len(self.paths)} page(s). Review before translating.{note}')
+  continuation=self.ocr_continuation; self.ocr_continuation=None
+  if self.ocr_closing: self.close()
+  elif result[0]=='finished' and result[1]=='completed' and not self.stop_requested and continuation:
+   QTimer.singleShot(0,continuation)
  def region_lines(self,text):
   return [line.strip() for line in text.replace('\\r','').split('\\n') if line.strip()]
  def add(self):
@@ -2000,25 +2254,28 @@ class Window(QMainWindow):
     try:
      shutil.copy2(r.crop,crops/name); copied+=1
     except OSError: name=''
-   records.append(json.dumps({'page':r.page,'panel':r.panel,'crop':f'crops/{name}' if name else '','recognised':r.jp,'translation':r.tr,'review':r.review,'reason':r.reason},ensure_ascii=False))
+   record={'page':r.page,'panel':r.panel,'crop':f'crops/{name}' if name else '','recognised':r.jp,'translation':r.tr,'review':r.review,'reason':r.reason}
+   if self.second_model_value(): record['translation2']=r.tr2
+   records.append(json.dumps(record,ensure_ascii=False))
   (out/'ocr_review.jsonl').write_text('\n'.join(records)+'\n',encoding='utf-8')
   self.status.setText(f'OCR review set written to {out}: {len(records)} row(s) and {copied} crop image(s).')
  def refresh(self):
-  self.table.setRowCount(len(self.rows))
-  for i,r in enumerate(self.rows):
-   for j,x in enumerate((r.page,r.panel,r.jp,r.tr,r.review)):
-    item=QTableWidgetItem(str(x))
-    # //remarks: Page/Panel are numeric and stay single-line and centred; text columns wrap. The Review
-    # //remarks: column is a marker, so it stays centred and short.
-    if j<2 or j==4:
-     item.setTextAlignment(Qt.AlignCenter)
-    else:
-     # //remarks: Long lines must reflow, so allow multi-line layout instead of eliding with "...".
-     item.setTextAlignment(Qt.AlignLeft|Qt.AlignTop)
-    # //remarks: The reason a row was flagged is shown on hover, so the check is explainable.
-    if j==4 and r.reason: item.setToolTip(r.reason)
-    self.table.setItem(i,j,item)
+  self.table.setRowCount(0)
+  for r in self.rows: self.append_table_row(r,fit=False)
   self._fit_rows()
+ def append_table_row(self,r,fit=True):
+  i=self.table.rowCount(); self.table.insertRow(i)
+  for j,x in enumerate((r.page,r.panel,r.jp,r.tr,r.tr2,r.review)):
+   item=QTableWidgetItem(str(x))
+   item.setTextAlignment(Qt.AlignCenter if j<2 or j==5 else Qt.AlignLeft|Qt.AlignTop)
+   if j==5 and r.reason: item.setToolTip(r.reason)
+   self.table.setItem(i,j,item)
+  if fit:
+   self.table.resizeRowToContents(i)
+   cap=max(160,int(self.table.viewport().height()*0.75))
+   if self.table.rowHeight(i)>cap:
+    self.table.setRowHeight(i,cap)
+    for j in (2,3,4): self.table.item(i,j).setToolTip(self.table.item(i,j).text())
  def _fit_rows(self):
   # //remarks: QTableWidget does not grow rows on its own. Size each row to the wrapped content so
   # //remarks: long OCR/translation lines are fully visible. The soft cap only prevents a single huge
@@ -2030,12 +2287,12 @@ class Window(QMainWindow):
    if self.table.rowHeight(i)>cap:
     self.table.setRowHeight(i,cap)
     # //remarks: Full text remains reachable when the row is capped, so nothing is truly lost.
-    for j in (2,3):
+    for j in (2,3,4):
      item=self.table.item(i,j)
      if item is not None: item.setToolTip(item.text())
  def sync(self):
   for i,r in enumerate(self.rows):
-   r.page=int(self.table.item(i,0).text() or 1); r.panel=int(self.table.item(i,1).text() or 1); r.jp=self.table.item(i,2).text(); r.tr=self.table.item(i,3).text(); r.review=self.table.item(i,4).text()
+   r.page=int(self.table.item(i,0).text() or 1); r.panel=int(self.table.item(i,1).text() or 1); r.jp=self.table.item(i,2).text(); r.tr=self.table.item(i,3).text(); r.tr2=self.table.item(i,4).text(); r.review=self.table.item(i,5).text()
  def begin_progress(self,total,label=''):
   # //remarks: Batch mode: a determinate bar so the user sees exact progress through N rows.
   self.progress.setRange(0,max(1,total)); self.progress.setValue(0)
@@ -2058,7 +2315,6 @@ class Window(QMainWindow):
   # //remarks: Hide the bar when idle so it only ever indicates active work.
   self.progress.setVisible(False); self.progress.setRange(0,1); self.progress.setValue(0)
   if label: self.status.setText(label)
-  QApplication.processEvents()
 
  def set_running(self,running):
   # //remarks: Single switch for a batch. Starting clears any earlier stop request and the quota list, so a
@@ -2070,12 +2326,10 @@ class Window(QMainWindow):
   self.update_actions()
 
  def stop(self):
-  # //remarks: The Stop button interrupts the current OCR or translation batch. Both phases run on the GUI
-  # //remarks: thread and only yield between pages, regions and rows, so the flag is read at the top of each
-  # //remarks: step and the batch unwinds as soon as it can; an in-flight API call or OCR inference always
-  # //remarks: returns first, which is why the status says the stop happens after the current step.
   if self.busy:
    self.stop_requested=True
+   if self.ocr_cancel is not None: self.ocr_cancel.set()
+   if self.translation_cancel is not None: self.translation_cancel.set()
    self.status.setText('Stopping after the current step...')
   else:
    self.status.setText('Start a batch first, then press Stop.')
@@ -2094,11 +2348,30 @@ class Window(QMainWindow):
    return None
   if not self.url.text() or not self.key.text() or not self.model.currentText(): QMessageBox.warning(self,'API settings required','Enter Base URL, API key, and model name.'); return None
   self.save(); return OpenAI(base_url=self.url.text().rstrip('/'),api_key=self.key.text())
- def translate(self,text,client):
+ def client2(self):
+  if self.duplicate_translator_models():
+   QMessageBox.warning(self,'Choose a different model','Translator 2 must use a different model from Translator 1 when using the same provider.')
+   return None
+  saved=self.profiles.get(self.second_provider_key)
+  if not saved or self.api_verified2!=self.second_provider_key or not saved.get('verified') or not self.url2_key:
+   QMessageBox.warning(self,'Second provider not verified','Choose a saved provider with a verified API key in the Provider 2 list.')
+   return None
+  model=self.second_model_value()
+  if not model:
+   QMessageBox.warning(self,'Model required','Choose or type a model for the second provider.')
+   return None
+  self.second_model=model
+  try: self.save()
+  except Exception as e: self.status.setText(f'Could not save settings: {e}')
+  return OpenAI(base_url=self.url2_url.rstrip('/'),api_key=self.url2_key)
+ def translate(self,text,client,second=False):
   target=self.lang.currentData() or language_key(self.lang.currentText())
   prof={'English':'natural conversational English','Bahasa Melayu':'natural Malaysian Malay, not Indonesian or textbook Malay','Simplified Chinese':'natural Mainland Chinese Simplified Chinese','Traditional Chinese':'natural Taiwanese Traditional Chinese','Korean':'natural conversational Korean'}[target]
   prompt=f'Translate this Japanese manga text into {prof}. Preserve tone, emotion, politeness, slang, humour, and implied meaning. Return only the translation, with no notes or explanation.\\n\\nJapanese:\\n{text}'
-  selected=self.model.currentText(); candidates=self.candidates(); last=None; self.last_model=''
+  model_widget=self.model2 if second else self.model
+  selected=model_widget.currentText().strip()
+  candidates=self.ranked(selected,model_widget=model_widget)
+  last=None; self.last_model=''
   for model in candidates:
    # //remarks: Stop is honoured between fallback attempts too, so a long chain of failing models cannot keep
    # //remarks: the batch running after the user asked it to stop.
@@ -2199,72 +2472,119 @@ class Window(QMainWindow):
   # //remarks: yet, local OCR runs first. Recognising manually beforehand is therefore optional, and the
   # //remarks: reviewed or edited rows are reused here without repeating OCR: useful when recognition needs
   # //remarks: fixing, or when the user wants to approve the lines before spending translation tokens.
-  if self.paths and not self.rows:
-   self.ocr()
-   # //remarks: Stop pressed during the OCR phase must also stop Translate all: the user asked the whole batch
-   # //remarks: to stop, so the translation phase is skipped and the recognised rows are kept for review.
-   if self.stop_requested:
-    self.status.setText(f'Stopped. {len(self.rows)} recognised row(s) kept; press Translate all again to continue.')
-    return
+  if self.busy: return
+  if self.duplicate_translator_models():
+   QMessageBox.warning(self,'Choose a different model','Translator 2 must use a different model from Translator 1 when using the same provider.')
+   return
+  if self.paths and not self.rows and not self.recognized:
+   self.ocr(continuation=self.all)
+   return
   self.sync()
   if not self.rows:
    QMessageBox.information(self,'No OCR text','Import images first, or click Recognise OCR to load the recognised lines.'); return
-  c=self.client()
-  if not c:return
   # //remarks: Do not send rows that already have a translation. Clear a Translation cell to request
   # //remarks: that row again deliberately.
   # //remarks: Suspicious rows are held back until the user reviews and clears the CHECK marker. This is
   # //remarks: the rejection mechanism: uncertain OCR never reaches the paid translation API automatically.
   todo=[r for r in self.rows if r.jp and not r.tr.strip() and not r.review.strip()]
   held=len([r for r in self.rows if r.jp and not r.tr.strip() and r.review.strip()])
-  if not todo:
+  todo2=[r for r in self.rows if r.jp and not r.tr2.strip() and not r.review.strip()] if self.second_model_value() else []
+  held2=sum(1 for r in self.rows if r.jp and not r.tr2.strip() and r.review.strip()) if self.second_model_value() else 0
+  if not todo and not todo2:
    if held:
     QMessageBox.information(self,'Review needed',f'{held} row(s) are flagged for review and were left untranslated. Compare them with the source region, correct the text, then clear the Review cell to approve a row.')
    else:
     QMessageBox.information(self,'No OCR text','There are no recognised text rows to translate.')
    return
-  # //remarks: Report batch size up front so the progress bar has a meaningful denominator.
-  self.begin_progress(len(todo),f'Translating 0/{len(todo)} rows...')
-  # //remarks: Stop becomes clickable for the whole translation phase and the quota list starts empty for this run.
+  c=self.client() if todo else None
+  if todo and not c: return
+  c2=self.client2() if todo2 else None
+  if todo2 and not c2: return
+  self.translation_next=(todo2,c2,True,held2) if todo and todo2 else None
+  if todo: self.start_translation(todo,c,False,held)
+  else: self.start_translation(todo2,c2,True,held2)
+ def all2(self):
+  if self.busy: return
+  if self.paths and not self.rows and not self.recognized:
+   self.ocr(continuation=self.all2)
+   return
+  self.sync()
+  if not self.rows:
+   QMessageBox.information(self,'No OCR text','Import images first, or click Recognise OCR to load the recognised lines.')
+   return
+  client=self.client2()
+  if not client: return
+  todo=[row for row in self.rows if row.jp and not row.tr2.strip() and not row.review.strip()]
+  held=sum(1 for row in self.rows if row.jp and not row.tr2.strip() and row.review.strip())
+  if not todo:
+   if held:
+    QMessageBox.information(self,'Review needed',f'{held} row(s) are flagged for review and were left untranslated. Compare them with the source region, correct the text, then clear the Review cell to approve a row.')
+   else:
+    QMessageBox.information(self,'No OCR text','There are no recognised text rows to translate with the second provider.')
+   return
+  self.start_translation(todo,client,True,held)
+ def start_translation(self,todo,client,second,held):
+  selected={id(row) for row in todo}
+  work=[(i,r.jp,r.page,r.panel) for i,r in enumerate(self.rows) if id(r) in selected]
+  widget=self.model2 if second else self.model
+  candidates=self.ranked(widget.currentText().strip(),model_widget=widget)
+  self.translation_events=queue.Queue(); self.translation_cancel=threading.Event()
+  self.translation_second=second; self.translation_held=held; self.translation_total=len(work)
+  self.translation_done=0; self.translation_result=None
+  self.translation_edit_triggers=self.table.editTriggers()
+  self.table.setEditTriggers(self.table.EditTrigger.NoEditTriggers)
   self.set_running(True)
-  try:
-   for i,r in enumerate(todo,1):
-    # //remarks: Stop is honoured between rows. The request already in flight cannot be cancelled, so the row
-    # //remarks: that is being translated when Stop is pressed still completes and is kept.
-    if self.stop_requested: raise StopRequested()
-    self.set_progress(i-1,len(todo),f'Translating row {i}/{len(todo)} (page {r.page}, panel {r.panel})...')
-    r.tr=self.translate(r.jp,c)
-    # //remarks: Update the table as each row completes so finished translations are visible during
-    # //remarks: the run, and the bar advances even when an individual call is slow.
-    self.set_progress(i,len(todo),f'Translated {i}/{len(todo)} rows...')
-    self.refresh()
-   flagged=len([r for r in self.rows if r.jp and not r.tr.strip() and r.review.strip()])
-   note=f' {flagged} flagged row(s) still need review.' if flagged else ''
-   self.end_progress(f'Translation completed for {len(todo)} row(s).{note}')
-   # //remarks: If the API was never tested, a successful batch translation is itself proof
-   # //remarks: the API works, so tick the pill automatically instead of leaving it as "not tested".
-   self.set_api_status(True,f'Verified automatically by Translate all (model: {self.last_model or self.model.currentText()})')
-   # //remarks: A successful batch proves the key as well as the provider, so the connection is remembered as verified
-   # //remarks: and comes back unlocked on the next launch instead of asking for another Test API press.
-   self.api_verified=profile_key(self.url.text().strip())
-   self.apply_connection_state()
-   self.save()
-  except StopRequested:
-   # //remarks: A stop keeps every finished row. The status line says how many were translated so the user knows
-   # //remarks: exactly where the batch was interrupted, and the connection is not marked failed.
-   done=len([r for r in todo if r.tr.strip()])
-   self.refresh(); self.end_progress(f'Translation stopped: {done}/{len(todo)} row(s) translated and kept.')
-  except Exception as e:
-   # //remarks: Hide the bar on failure too, otherwise a stalled bar looks like a hang.
-   self.end_progress(f'Translation stopped: {e}')
-   # //remarks: A failed batch still tells us the API is not usable with these settings.
-   self.set_api_status(False,str(e))
-   # //remarks: When the cause was an exhausted free allowance, the reminder popup replaces the generic failure
-   # //remarks: dialog so the user is told what actually happened and what to do next.
-   if not self.show_quota_limit_notice(): QMessageBox.critical(self,'Translation failed',str(e))
-  finally:
-   # //remarks: The batch is over however it ended, so Stop goes back to disabled.
-   self.set_running(False)
+  self.progress.setRange(0,len(work)); self.progress.setValue(0); self.progress.setFormat('%v/%m'); self.progress.setVisible(True)
+  self.status.setText(f'Translating 0/{len(work)} rows...')
+  target=self.lang.currentData() or language_key(self.lang.currentText())
+  self.translation_thread=threading.Thread(target=translation_worker,args=(work,client,target,candidates,self.translation_events,self.translation_cancel),daemon=True)
+  self.translation_thread.start(); self.translation_poll.start()
+
+ def poll_translation(self):
+  thread=self.translation_thread
+  if thread is None: return
+  while True:
+   try: event=self.translation_events.get_nowait()
+   except queue.Empty: break
+   if event[0]=='progress':
+    self.progress.setValue(event[1]); self.status.setText(event[3])
+   elif event[0]=='row':
+    _,index,text,model=event
+    row=self.rows[index]
+    if self.translation_second: row.tr2=text
+    else: row.tr=text
+    self.table.item(index,4 if self.translation_second else 3).setText(text)
+    self.table.resizeRowToContents(index)
+    self.translation_done+=1; self.progress.setValue(self.translation_done); self.last_model=model
+   elif event[0]=='quota': self.record_quota_limit(event[1],event[2])
+   else: self.translation_result=event
+  if thread.is_alive(): return
+  self.translation_poll.stop(); self.translation_thread=None; self.translation_cancel=None; self.translation_events=None
+  self.table.setEditTriggers(self.translation_edit_triggers)
+  result=self.translation_result or ('error','Translation worker exited without a result.')
+  second=self.translation_second
+  self.set_running(False)
+  if result[0]=='error':
+   self.end_progress(f'Translation failed: {result[1]}')
+   if second: self.set_api_status2(False,result[1])
+   else: self.set_api_status(False,result[1])
+   if not self.ocr_closing and not self.show_quota_limit_notice(): QMessageBox.critical(self,'Translation failed',result[1])
+  elif result[1]=='stopped' or self.stop_requested:
+   self.end_progress(f'Translation stopped: {self.translation_done}/{self.translation_total} row(s) translated and kept.')
+  else:
+   note=f' {self.translation_held} flagged row(s) still need review.' if self.translation_held else ''
+   self.end_progress(f'Translation completed for {self.translation_done} row(s).{note}')
+   if second: self.set_api_status2(True,f'Successfully translated with {self.last_model}')
+   else:
+    self.set_api_status(True,f'Verified automatically by Translate all (model: {self.last_model})')
+    self.api_verified=profile_key(self.url.text().strip()); self.apply_connection_state()
+   try: self.save()
+   except Exception as e: self.status.setText(f'Translations completed, but settings could not be saved: {e}')
+  next_job=self.translation_next if hasattr(self,'translation_next') else None
+  self.translation_next=None
+  if self.ocr_closing: self.close()
+  elif result[0]=='finished' and result[1]=='completed' and not self.stop_requested and next_job:
+   self.start_translation(*next_job)
  def export(self):
   # //remarks: One Export action instead of a button per format. The format is chosen in the dialog, so adding
   # //remarks: another format later does not add another button to the toolbar. The file dialog's filter is the
@@ -2295,13 +2615,19 @@ class Window(QMainWindow):
    QMessageBox.critical(self,'Export failed',f'{type(e).__name__}: {e}'); return
   self.status.setText(f'Exported {len(self.rows)} row(s) to {target.name}.')
  def write_txt(self,target):
-  Path(target).write_text('Page\tPanel\tRecognised text\tTranslation\n'+'\n'.join(f'{r.page}\t{r.panel}\t{r.jp}\t{r.tr}' for r in self.rows),encoding='utf-8')
+  include_second=bool(self.second_model_value())
+  headers=['Page','Panel','Recognised text','Translation']+(['Translation 2'] if include_second else [])
+  lines=['\t'.join(headers)]
+  for r in self.rows: lines.append('\t'.join(map(str,[r.page,r.panel,r.jp,r.tr]+([r.tr2] if include_second else []))))
+  Path(target).write_text('\n'.join(lines),encoding='utf-8')
  def write_docx(self,target):
-  d=Document(); t=d.add_table(rows=1,cols=4)
-  for c,x in zip(t.rows[0].cells,['Page','Panel','Recognised text','Translation']): c.text=x
+  include_second=bool(self.second_model_value())
+  headers=['Page','Panel','Recognised text','Translation']+(['Translation 2'] if include_second else [])
+  d=Document(); t=d.add_table(rows=1,cols=len(headers))
+  for c,x in zip(t.rows[0].cells,headers): c.text=x
   for r in self.rows:
    cells=t.add_row().cells
-   for c,x in zip(cells,[r.page,r.panel,r.jp,r.tr]): c.text=str(x)
+   for c,x in zip(cells,[r.page,r.panel,r.jp,r.tr]+([r.tr2] if include_second else [])): c.text=str(x)
   d.save(str(target))
  def write_pdf(self,target):
   # //remarks: Rendered with Pillow rather than a PDF library, because Pillow is already a dependency and
@@ -2323,7 +2649,9 @@ class Window(QMainWindow):
   body=font(19); head=font(19,True)
   # //remarks: Column widths as fractions of the usable width, mirroring the on-screen table's emphasis on the
   # //remarks: two text columns.
-  widths=[0.09,0.09,0.41,0.41]
+  include_second=bool(self.second_model_value())
+  widths=[0.07,0.07,0.30,0.28,0.28] if include_second else [0.07,0.07,0.43,0.43]
+  headers=['PAGE','PANEL','Recognised text','TRANSLATION']+(['TRANSLATION 2'] if include_second else [])
   usable=W-margin*2
   cols=[int(usable*w) for w in widths]
   pages=[]; img=None; draw=None; y=0
@@ -2331,7 +2659,7 @@ class Window(QMainWindow):
    nonlocal img,draw,y
    img=Image.new('RGB',(W,H),'white'); draw=ImageDraw.Draw(img)
    x=margin
-   for label,width in zip(['PAGE','PANEL','Recognised text','TRANSLATION'],cols):
+   for label,width in zip(headers,cols):
     draw.rectangle([x,margin,x+width,margin+header_h],fill='#f1f3f5')
     draw.text((x+6,margin+9),label,font=head,fill='#344054'); x+=width
    y=margin+header_h
@@ -2355,7 +2683,7 @@ class Window(QMainWindow):
    return out or ['']
   new_page()
   for r in self.rows:
-   cells=[str(r.page),str(r.panel),r.jp,r.tr]
+   cells=[str(r.page),str(r.panel),r.jp,r.tr]+([r.tr2] if include_second else [])
    wrapped=[wrap(c,cols[i],body) for i,c in enumerate(cells)]
    lines=max(len(w) for w in wrapped)
    need=lines*24+12
@@ -2369,4 +2697,5 @@ class Window(QMainWindow):
   pages[0].save(str(target),'PDF',resolution=150.0,save_all=True,append_images=pages[1:])
 
 if __name__=='__main__':
+ multiprocessing.freeze_support()
  a=QApplication(sys.argv); w=Window(); w.show(); sys.exit(a.exec())

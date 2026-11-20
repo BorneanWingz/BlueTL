@@ -1,6 +1,6 @@
 # BlueTL — Manga Translation Desktop App
 
-[![Version](https://img.shields.io/badge/version-v0.1.6-magenta)](https://github.com/BorneanWingz/BlueTL/blob/main/BUILD.md)
+[![Version](https://img.shields.io/badge/version-v0.1.7-magenta)](https://github.com/BorneanWingz/BlueTL/blob/main/BUILD.md)
 [![Platform](https://img.shields.io/badge/platform-Windows-blue)]()
 [![License](https://img.shields.io/badge/license-MIT%20core%20%2F%20GPL--3.0%20component-green)](LICENSE.md)
 
@@ -31,9 +31,13 @@ OpenAI-compatible API provider, and exports TXT, DOCX, or PDF results.
 2. Run `BlueTL.exe` (no installation required).
 3. Enter your OpenAI-compatible **Base URL** and **API key**, then press **Save**.
 
-## Responsive OCR (v0.1.6+)
+## Responsive OCR (v0.1.7+)
 
-OCR now runs on a background thread. The window stays fully responsive while pages are being recognised — you can scroll the table, resize the window, or press **Stop** at any time. Completed rows appear incrementally as each page finishes. Model memory (~500 MB) is released automatically after the batch ends.
+OCR runs in a separate process, and batch translation requests run on a background thread.
+You can scroll the table or press **Stop** while they run. Recognised rows and completed
+translations appear incrementally. The current model load, OCR step, or API request must
+finish before stopping; the OCR process exits afterward, releasing its process memory.
+Table editing and actions that change the batch are disabled until it finishes.
 
 
 **This app is not signed with Windows certificate, as with most self-developed executables, so Windows or antivirus software may show a false-positive warning.**
@@ -62,18 +66,23 @@ Provider model lists are cached per Base URL and restored on the next launch, in
 when the provider is temporarily offline. A bare host such as `localhost:1234` receives
 a scheme and `/v1` automatically. A model ID can also be typed manually.
 
+Translator 2 is optional. In Control Panel, choose a verified saved provider (the same
+provider or another one) and a model. Choose **---** to disable Translator 2. Its previous
+results are kept while the batch is open, but are hidden and omitted from exports until a
+second model is selected again. When both translators use the same provider, select
+different models; each translator's fallback list also excludes the other selected model.
+
 **Free models only** filters fetched model IDs containing `free` (case-insensitive). If no
 fetched model ID matches, the app says so and unticks the box, restoring the full list.
-When a non-free model is selected, free models are attempted first, followed by the
-selected model and then other models reported by the provider.
+The selected model is attempted first, followed by other free models and then the
+remaining models reported by the provider.
 
 ### Import and OCR
 
 BlueTL accepts JPG, JPEG, PNG, WebP, and PSD images, plus ZIP, RAR, and 7Z archives
 containing them. **Import** opens a picker with two choices: **Select files...** accepts
-several files at once, and **Select a folder...** imports exactly one folder, scanned
-recursively, so a directory of pages or a parent folder holding one sub-folder per chapter
-both work. Files are ordered naturally by name, so `chapter-2.jpg` precedes
+several files at once, and **Select a folder...** imports one folder without sub-folders.
+Files are ordered naturally by name, so `chapter-2.jpg` precedes
 `chapter-10.jpg`. Layered PSD files are composited with `psd-tools`, including 16-bit
 documents, before OCR.
 
@@ -86,7 +95,9 @@ the batch continues.
 ### Review and translation
 
 - **Recognise OCR** runs local OCR without spending API tokens.
-- **Translate all** recognises first when needed, then translates only rows without a translation.
+- **Translate all** recognises first when needed, then translates missing results using
+  Translator 1 and, if enabled, Translator 2. Completed translations and rows marked for
+  review are skipped independently for each translator.
 - **Stop** sits beside **Translate all** and interrupts whichever batch is running. Because
   Translate all runs OCR first when needed, Stop cancels both phases. Work already finished
   is kept: recognised rows stay in the table and finished translations are not discarded.
@@ -99,9 +110,9 @@ If the chosen model, or one of the fallback models, runs out of free tokens or r
 request limit, a popup names the affected models and explains what to do next. It replaces
 the generic failure dialog and is shown once per batch rather than once per row.
 
-The detector and OCR model are released when a batch finishes, so the app does not keep
-roughly half a gigabyte of model memory resident while you review or translate. The next
-batch reloads them, which costs about a second.
+The OCR process exits when a batch finishes, releasing its models and native-library memory.
+The next OCR batch reloads them; peak memory during recognition depends on the models, images,
+and system. API tests still run synchronously.
 
 ### Export
 
@@ -110,6 +121,8 @@ One **Export** button opens a save dialog whose file-type picker chooses the for
 the file name and the format always agree. PDF output paginates the table onto A4 pages at
 150 DPI and wraps long lines inside their column. Clearing a Translation cell makes that row
 eligible for translation again.
+TXT, DOCX, and PDF exports include the second translation column only when Translator 2
+has a selected model.
 
 
 ## Interface
@@ -117,10 +130,10 @@ eligible for translation again.
 The left navigation contains Translate, Control Panel, and About. Each page has its own icon
 and a horizontal label. Use **<<** at the bottom of the sidebar to collapse it to icons only
 (labels stay in the tooltips), and **>>** to expand it again. Translate keeps the compact
-provider summary inside Translation Settings alongside model refresh, API status, image status,
-and the primary Import, Recognise OCR, Translate all, and Stop actions. Test API, Export, and
-row-editing actions are grouped below. Control Panel contains the full provider connection editor
-and the default output-language and export-format pickers. The export dialog remains fully selectable
+summaries for both translators, model refresh, API status, image status, and the primary
+Import, Recognise OCR, Translate all, and Stop actions. Control Panel contains the provider
+connection editor, both model pickers, and the default output-language and export-format pickers.
+The export dialog remains fully selectable
 for each export; the saved format is only the initial selection. About shows version and author
 information and links to
 the public README and optional [donation page](https://buymeacoffee.com/DrLwSii).
@@ -162,12 +175,21 @@ provider model names do not automatically provide downloadable local weights.
 
 ## Version history
 
-**Current version: v0.1.6**
+**Current version: v0.1.7**
+
+### v0.1.7
+
+- Updated the Translate and Control Panel layouts for two translators.
+- Translator 2 is optional; select `---` to hide its column and omit it from exports.
+  Translators using the same provider must select different models.
+- Translate all runs both selected translators, preserving completed results and honouring Stop.
+- OCR runs in a separate process and batch translation runs on a background thread, keeping
+  the table scrollable while work proceeds. OCR process memory is released when it exits.
+- Fixed the comparison-provider reset and added Windows executable version metadata.
 
 ### v0.1.6
 
-- **OCR runs on a background thread** — the UI stays fully responsive during recognition. You can scroll the table, resize the window, and press **Stop** at any time. Rows appear incrementally as each page finishes. Model memory (~500 MB) is released automatically after the batch ends.
-- Stop button now interrupts OCR immediately (previously only between pages).
+- Documented the intended responsive OCR interface, implemented in v0.1.7.
 
 ### v0.1.5
 
@@ -223,5 +245,5 @@ with GPL-3.0 and provide the complete corresponding source. See [LICENSE.md](LIC
 
 ---
 
-*BlueTL · Version v0.1.5 · Author: Blue-Wingz @ facedesk · Published by borneanwingz.fl*
+*BlueTL · Version v0.1.7 · Author: Blue-Wingz @ facedesk · Published by borneanwingz.fl*
 
