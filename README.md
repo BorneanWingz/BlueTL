@@ -19,8 +19,9 @@ OpenAI-compatible API provider, and exports TXT, DOCX, or PDF results.
 - Runs from source or as a portable PyInstaller folder.
 - Local OCR does not require an API request.
 - Translation requires an internet connection to the configured provider.
-- No provider, API key, or model list is compiled into the executable.
-- Users are responsible for obtaining and configuring their own providers and API keys.
+- BlueTL is BYOK (bring your own key): no provider, API key, or model list is
+  compiled into the executable, and you obtain and configure your own provider
+  and API key.
 - Settings are saved in `%APPDATA%\BlueTL\config.json`.
 - API keys are protected with Windows DPAPI and are never stored as plaintext.
 - Output is machine-generated and may be wrong; review it before you rely on it.
@@ -57,10 +58,11 @@ output.**
 
 ### Provider connection
 
-Enter an OpenAI-compatible **Base URL** and **API key**, then press **Save**. The app
-fetches the provider's `GET /models` response before enabling the Model picker. Editing
-either connection field makes the connection stale and locks the picker until it is
-confirmed again.
+BlueTL follows a BYOK design: any OpenAI-compatible provider works, including
+local servers. Enter its **Base URL** and your **API key**, then press **Save**.
+The app fetches the provider's `GET /models` response before enabling the Model
+picker. Editing either connection field makes the connection stale and locks the
+picker until it is confirmed again.
 
 Provider model lists are cached per Base URL and restored on the next launch, including
 when the provider is temporarily offline. A bare host such as `localhost:1234` receives
@@ -186,44 +188,6 @@ provider model names do not automatically provide downloadable local weights.
 - OCR runs in a separate process and batch translation runs on a background thread, keeping
   the table scrollable while work proceeds. OCR process memory is released when it exits.
 - Fixed the comparison-provider reset and added Windows executable version metadata.
-
-### v0.1.6
-
-- Documented the intended responsive OCR interface, implemented in v0.1.7.
-
-### v0.1.5
-
-Changes made from 15 November 2026 at 00:00 through this release:
-
-- Added left-side navigation with **Translate**, **Control Panel**, and **About**; renamed
-  **Translator** to **Translate**.
-- Moved provider configuration into Control Panel while retaining its compact status summary
-  inside Translation Settings.
-- Added persisted default output-language and export-format pickers. Export still offers PDF,
-  DOCX, and TXT every time; the default only controls the initial selection and file extension.
-- Added interruptible OCR and translation with a **Stop** button that preserves completed work.
-- Added a consolidated reminder when free tokens, credits, quotas, or request limits are exhausted.
-- Changed Import to explicit file/folder choices and kept BlueTL folder imports to one flat folder.
-- Added bilingual target-language labels and expanded automated regression coverage.
-
-### v1.0.4
-
-- Fixed the translation table: a selected or edited cell no longer paints over its text, so
-  the row stays readable while you click or type in it.
-- **Free models only** now unticks itself after the "No free models detected." message, so the
-  dropdown returns to the provider's full list instead of staying empty.
-- Replaced the separate **Export TXT** and **Export DOCX** buttons with one **Export** button
-  whose save dialog offers PDF, DOCX, or TXT.
-- Added PDF export, rendered with Pillow so no new dependency is needed.
-
-### v1.0.3
-
-- Import a whole folder: cancelling the file dialog opens a folder picker that scans
-  flatly, so a chapter directory or a parent folder of per-chapter sub-folders both work.
-- Added 7Z archive support alongside ZIP and RAR.
-- The detector and OCR model are released when a batch finishes, so the app no longer keeps
-  roughly half a gigabyte of model memory resident while you review or translate.
-- Capped the PyTorch CPU thread pool, which reduces the memory cost of the OCR runtime.
 
 ## Credits
 
